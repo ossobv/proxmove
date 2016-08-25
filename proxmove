@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 __author__ = 'Walter Doekes'
 __copyright__ = 'Copyright (C) Walter Doekes, OSSO B.V. 2016'
 __licence__ = 'GPLv3+'
-__version__ = '0.0.2'
+__version__ = '0.0.3'
 
 
 class ArgumentParser14191(argparse.ArgumentParser):
@@ -384,6 +384,9 @@ def load_config():
         default='~/.proxmoverc', help=(
             'use alternate configuration inifile'))
     parser.add_argument(
+        '-n', '--dry-run', action='store_true', help=(
+            'stop before doing any writes'))
+    parser.add_argument(
         '--version', action='version', version=(
             'proxmove {}'.format(__version__)))
     parser.add_argument(
@@ -501,17 +504,21 @@ def main():
     for src_vm in vms:
         print('-', src_vm.name)
         print('  source', src_vm)
-        dst_config = translator.config(src_vm.get_config())
-        dst_vm = dest.create_vm(src_vm.type, dst_config, nodeid=None)
-        print('  destination', dst_vm)
-        print('  stopping', src_vm)
-        src_vm.stop()
-        print('  stopped', src_vm)
-        src_vm.add_comment('{} UTC: Migrated to {}'.format(
-            datetime.utcnow(), dst_vm))
-        print('  commented', src_vm)
-        src_vm.rename(src_vm.name + '--MIGRATED')
-        print('  renamed', src_vm)
+        for key, value in src_vm.get_config().items():
+            if key.startswith('ide') or key.startswith('virtio'):
+                print('  listing disk {!r}: {}'.format(key, value))
+        if not options.dry_run:
+            dst_config = translator.config(src_vm.get_config())
+            dst_vm = dest.create_vm(src_vm.type, dst_config, nodeid=None)
+            print('  destination', dst_vm)
+            print('  stopping', src_vm)
+            src_vm.stop()
+            print('  stopped', src_vm)
+            src_vm.add_comment('{} UTC: Migrated to {}'.format(
+                datetime.utcnow(), dst_vm))
+            print('  commented', src_vm)
+            src_vm.rename(src_vm.name + '--MIGRATED')
+            print('  renamed', src_vm)
 
 
 if __name__ == '__main__':

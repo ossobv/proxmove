@@ -28,6 +28,8 @@ Example:
     Moving from cluster1<e1400248> to cluster2<6669ad2c>
     - machine-to-move
       source machine-to-move@pve08<qemu/520/running>
+      listing disk 'ide2': san06:iso/debian-8.0.0-amd64-netinst.iso,media=cdrom
+      listing disk 'virtio0': san08:520/vm-520-disk-1.qcow2,format=qcow2,...
       destination machine-to-move@mc9-8<qemu/123/stopped>
       stopping machine-to-move@pve08<qemu/520/running>
       stopped machine-to-move@pve08<qemu/520/stopped>
@@ -39,7 +41,8 @@ See the help for more options:
 
 .. code-block:: console
 
-    usage: proxmove [-h] [-c FILENAME] [--version] source destination vm [vm ...]
+    usage: proxmove [-h] [-c FILENAME] [-n] [--version]
+                    source destination vm [vm ...]
     
     Migrate VMs from one Proxmox cluster to another.
     
@@ -52,6 +55,7 @@ See the help for more options:
       -h, --help            show this help message and exit
       -c FILENAME, --config FILENAME
                             use alternate configuration inifile
+      -n, --dry-run         stop before doing any writes
       --version             show program's version number and exit
     
     Cluster aliases should be defined in ~/.proxmoverc (or see -c option). Define
