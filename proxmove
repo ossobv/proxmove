@@ -1,0 +1,518 @@
+#!/usr/bin/env python3
+# vim: set ts=8 sw=4 sts=4 et ai:
+from __future__ import print_function
+"""
+proxmove: Proxmox Node Migration -- migrate nodes from one proxmox
+cluster to another
+
+This is proxmove.  proxmove is free software: you can redistribute it
+and/or modify it under the terms of the GNU General Public License as
+published by the Free Software Foundation, version 3 or any later
+version.
+"""
+import argparse
+import configparser
+import os
+import random
+import re
+import sys
+import time
+from datetime import datetime
+from proxmoxer import ProxmoxAPI
+from urllib.parse import urlparse
+
+__author__ = 'Walter Doekes'
+__copyright__ = 'Copyright (C) Walter Doekes, OSSO B.V. 2016'
+__licence__ = 'GPLv3+'
+__version__ = '0.0.2'
+
+
+class ArgumentParser14191(argparse.ArgumentParser):
+    """ArgumentParser from argparse that handles out-of-order positional
+    arguments.
+
+    This is a workaround created by Glenn Linderman in July 2012. You
+    can now do this:
+
+        parser = ArgumentParser14191()
+        parser.add_argument('-f', '--foo')
+        parser.add_argument('cmd')
+        parser.add_argument('rest', nargs='*')
+        # some of these would fail with the regular parser:
+        for args, res in (('-f1 cmd 1 2 3', 'ok'),
+                          ('cmd -f1 1 2 3', 'would_fail'),
+                          ('cmd 1 -f1 2 3', 'would_fail'),
+                          ('cmd 1 2 3 -f1', 'ok')):
+            try: out = parser.parse_args(args.split())
+            except: print 'args', 'failed', res
+            # out: Namespace(cmd='cmd', foo='1', rest=['1', '2', '3'])
+
+    Bugs: http://bugs.python.org/issue14191
+    Files: http://bugs.python.org/file26273/t18a.py
+    Changes: renamed to ArgumentParser14191 ** PEP cleaned ** hidden
+      ErrorParser inside ArgumentParser14191 ** documented ** used
+      new-style classes super calls  (Walter Doekes, March 2015)
+    """
+    class ErrorParser(argparse.ArgumentParser):
+        def __init__(self, *args, **kwargs):
+            self.__errorobj = None
+            super(ArgumentParser14191.ErrorParser, self).__init__(
+                *args, add_help=False, **kwargs)
+
+        def error(self, message):
+            if self.__errorobj:
+                self.__errorobj.error(message)
+            else:
+                argparse.ArgumentParser.error(self, message)
+
+        def seterror(self, errorobj):
+            self.__errorobj = errorobj
+
+    def __init__(self, *args, **kwargs):
+        self.__setup = False
+        self.__opt = ArgumentParser14191.ErrorParser(*args, **kwargs)
+        super(ArgumentParser14191, self).__init__(*args, **kwargs)
+        self.__opt.seterror(self)
+        self.__setup = True
+
+    def add_argument(self, *args, **kwargs):
+        super(ArgumentParser14191, self).add_argument(*args, **kwargs)
+        if self.__setup:
+            chars = self.prefix_chars
+            if args and len(args[0]) and args[0][0] in chars:
+                self.__opt.add_argument(*args, **kwargs)
+
+    def parse_args(self, args=None, namespace=None):
+        ns, remain = self.__opt.parse_known_args(args, namespace)
+        ns = super(ArgumentParser14191, self).parse_args(remain, ns)
+        return ns
+
+
+class ProxmoxClusters(dict):
+    @classmethod
+    def from_filename(cls, filename):
+        proxmoxclusters = cls()
+        parser = configparser.ConfigParser(interpolation=None)
+
+        try:
+            with open(filename) as fp:
+                try:
+                    parser.read_file
+                except AttributeError:
+                    parser.readfp(fp)
+                else:
+                    parser.read_file(fp)
+        except FileNotFoundError:
+            raise ValueError('cannot access config file: {}'.format(
+                filename))
+
+        for section in parser.sections():
+            if section == configparser.DEFAULTSECT:
+                raise ValueError(
+                    'Defaults in {!r}? Why?'.format(section))
+
+            proxmoxclusters[section] = ProxmoxCluster.from_section(
+                section, parser.items(section))
+
+        return proxmoxclusters
+
+
+class ProxmoxCluster(object):
+    @classmethod
+    def from_section(cls, name, section):
+        cluster = cls(name)
+
+        for key, value in section:
+
+            if key in cluster._data:
+                raise ValueError(
+                    'Duplicate key {!r} in section {!r}'.format(
+                        key, name))
+
+            if key == 'proxmoxapi':
+                cluster._data[key] = value
+            else:
+                raise ValueError(
+                    'Unknown key {!r} in section {!r}'.format(
+                        key, name))
+
+        return cluster
+
+    def __init__(self, name):
+        self.name = name
+        self.repoid = None
+        self._data = {}
+        self._proxmox_cache = {}
+        self._vms = {}
+
+    @property
+    def proxmoxapi(self):
+        if not hasattr(self, '_proxmoxapi'):
+            uri = self._data.get('proxmoxapi', '')
+            try:
+                res = urlparse(uri)
+            except AssertionError as e:
+                raise ValueError(
+                    'splitting {!r} proxmoxapi {!r} URI failed: {}'.format(
+                        self.name, uri, e))
+            proxmox = ProxmoxAPI(
+                res.hostname, port=res.port, user=res.username,
+                password=res.password, verify_ssl=True)
+            self._proxmoxapi = proxmox
+        return self._proxmoxapi
+
+    def create_vm(self, type_, config, nodeid):
+        if not nodeid:
+            nodeid = self.get_random_node()
+
+        vmid = self.get_free_vmid()
+        node = self._proxmoxapi.nodes(nodeid)
+        vm = getattr(node, type_).create(vmid=vmid, **config)
+        del vm  # some kind of creation hash; we don't need it
+        # Purge cache after write operation!
+        self._proxmox_cache = {}
+
+        # Wait a while to ensure that we get the VM.
+        for i in range(30):
+            try:
+                vm = self.get_vm(config['name'])
+            except ProxmoxVm.DoesNotExist:
+                pass
+            else:
+                break
+            time.sleep(1)
+        else:
+            raise ProxmoxVm.Error('Could not get newly created VM {!r}'.format(
+                config['name']))
+        return vm
+
+    def get_vms_dict(self):
+        if 'cluster.resources.type=vm' not in self._proxmox_cache:
+            vms = self._proxmox_cache['cluster.resources.type=vm'] = (
+                self.proxmoxapi.cluster.resources.get(type='vm'))
+        else:
+            vms = self._proxmox_cache['cluster.resources.type=vm']
+        return vms
+
+    def get_free_vmid(self):
+        """
+        BEWARE: To get the numbers right, we need to have enough
+        permissions to see all.
+        """
+        vms = self.get_vms_dict()
+        if not vms:
+            return 100
+        ordered_vms = [vm['vmid'] for vm in vms]
+        ordered_vms.sort()
+        if (ordered_vms[-1] - ordered_vms[0] + 1) == len(ordered_vms):
+            return ordered_vms[-1] + 1
+        prev = ordered_vms[0]
+        for vmid in ordered_vms[1:]:
+            if prev + 1 != vmid:
+                return prev + 1
+            prev = vmid
+        raise NotImplementedError('This cannot happen: {}'.format(
+            ordered_vms))
+
+    def get_random_node(self):
+        if 'nodes' not in self._proxmox_cache:
+            nodes = self._proxmox_cache['nodes'] = (
+                self.proxmoxapi.nodes.get())
+        else:
+            nodes = self._proxmox_cache['nodes']
+        nodes = [
+            node['node'] for node in nodes
+            if node.get('uptime') and node['type'] == 'node']
+        return random.choice(nodes)
+
+    def get_vm(self, name):
+        if name in self._vms:
+            return self._vms['name']
+        proxmox_vms = self.get_vms_dict()
+        res = [vm for vm in proxmox_vms if vm.get('name') == name]
+        if len(res) == 0:
+            raise ProxmoxVm.DoesNotExist(
+                'VM named {!r} not found in cluster {!r}'.format(
+                    name, self.name))
+        elif len(res) > 1:
+            raise ProxmoxVm.Error(
+                'VM named {!r} found multiple times in cluster {!r}'.format(
+                    name, self.name))
+        vm = self._vms[name] = ProxmoxVm.from_dict(res[0], self.proxmoxapi)
+        return vm
+
+    def ping(self):
+        version = self.proxmoxapi.version.get()
+        if not isinstance(version, dict) or 'release' not in version:
+            raise ProxmoxVm.Error(
+                'cluster {!r} did not return proper version: {!r}'.format(
+                    version))
+        self.repoid = version['repoid']
+
+    def __str__(self):
+        if self.repoid:
+            return '{}<{}>'.format(self.name, self.repoid)
+        return self.name
+
+
+class ProxmoxVm(object):
+    class Error(ValueError):
+        pass
+
+    class DoesNotExist(Error):
+        pass
+
+    @classmethod
+    def from_dict(cls, dict_, proxmoxapi):
+        vm = cls()
+        vm.name = dict_['name']
+        vm.node = dict_['node']
+        vm.type = dict_['type']  # qemu|lxc|...
+        vm.id = dict_['vmid']
+        vm.status = dict_['status']  # "running"
+        vm._proxmoxapi = proxmoxapi
+
+        # Get config immediately, checks for pending changes too.
+        vm.get_config()
+        return vm
+
+    def get_config(self):
+        """
+        Get current configuration and check that the are no pending
+        changes.
+        """
+        if not hasattr(self, '_config'):
+            node = self._proxmoxapi.nodes(self.node)
+            vm = getattr(node, self.type)(self.id)
+            next_config = vm.config.get()
+
+            # Check pending.
+            pending_config = vm.pending.get()  # may not exist for lxc?
+            pending = []
+            for dict_ in pending_config:
+                keys = dict_.keys()
+                if keys == set(['key', 'value']):
+                    assert next_config.get(dict_['key']) == dict_['value']
+                else:
+                    pending.append('{!r}({!r}=>{!r})'.format(
+                        dict_['key'], dict_['value'], dict_['pending']))
+            if pending:
+                # Contains 'pending' changes. Refuse to continue.
+                raise ProxmoxVm.Error(
+                    'VM {!r} contains pending changes: {}'.format(
+                        self.name, ', '.join(pending)))
+
+            self._config = next_config
+        return self._config
+
+    def rename(self, new_name):
+        node = self._proxmoxapi.nodes(self.node)
+        vm = getattr(node, self.type)(self.id)
+        vm.config.put(name=new_name)
+        self.name = new_name
+
+    def stop(self, timeout=120):
+        node = self._proxmoxapi.nodes(self.node)
+        vm = getattr(node, self.type)(self.id)
+        # forceStop takes a boolean, but proxmoxer won't pass True as
+        # "true", but as True.
+        vm.status.shutdown.create(forceStop='1', timeout=timeout)
+        for i in range(timeout + 10):
+            time.sleep(1)
+            status = vm.status.current.get()
+            if status['status'] == 'stopped':
+                self.status = 'stopped'
+                break
+        else:
+            self.status = status['status']
+            raise ProxmoxVm.Error(
+                'VM {!r} refuses to shut down: status = {!r}'.format(
+                    self.name, self.status))
+
+    def add_comment(self, comment):
+        config = self.get_config()
+        if 'description' in config:
+            comment = config['description'].rstrip() + '\n' + comment.strip()
+        else:
+            comment = comment.strip()
+
+        node = self._proxmoxapi.nodes(self.node)
+        vm = getattr(node, self.type)(self.id)
+        vm.config.put(description=comment)
+        del self._config  # drop cache
+
+    def __str__(self):
+        return '{}@{}<{}/{}/{}>'.format(
+            self.name, self.node, self.type, self.id, self.status)
+
+
+class DefaultConfigTranslator(object):
+    def config(self, old_config):
+        new_config = {}
+        for key, value in old_config.items():
+            # The digest is used to prevent changes if the current
+            # config doesn't match the digest. This blocks
+            # concurrent updates.
+            if key == 'digest':
+                pass
+            # v-- should remove CDROM
+            # 'ide2': 'san06:iso/debian-8.0.0-amd64-netinst.iso,media=cdrom',
+            elif (re.match('^(ide|virtio)\d+$', key) and
+                    ',media=cdrom' in value):
+                new_config[key] = re.sub('^[^,]*', 'none', value)
+            # V-- temporary
+            # 'virtio0': 'san06:...,...' => 'none,...'
+            elif re.match('^(ide|virtio)\d+$', key):
+                new_config[key] = re.sub('^[^,]*', 'none', value)
+            else:
+                new_config[key] = value
+        return new_config
+
+
+def load_config():
+    parser = ArgumentParser14191(
+        description=(
+            'Migrate VMs from one Proxmox cluster to another.'),
+        epilog=(
+            'Cluster aliases should be defined in ~/.proxmoverc '
+            '(or see -c option). '
+            'Define sections with the cluster name in brackets. The '
+            'proxmoxapi= setting specifies how to reach the Proxmox '
+            'API using common https://user:pass@host:port syntax.'))
+    parser.add_argument(
+        '-c', '--config', action='store', metavar='FILENAME',
+        default='~/.proxmoverc', help=(
+            'use alternate configuration inifile'))
+    parser.add_argument(
+        '--version', action='version', version=(
+            'proxmove {}'.format(__version__)))
+    parser.add_argument(
+        'source', action='store', help=(
+            'alias of source cluster'))
+    parser.add_argument(
+        'destination', action='store', help=(
+            'alias of destination cluster'))
+    parser.add_argument(
+        'vm', action='store', nargs='+', help=(
+            'one or more VMs (guests) to move'))
+
+    args = parser.parse_args()
+
+    try:
+        clusters = ProxmoxClusters.from_filename(
+            os.path.expanduser(args.config))
+    except ValueError as e:
+        parser.error(e.args[0])
+
+    if args.source == args.destination:
+        parser.error('source and destination arguments are the same')
+
+    try:
+        args.source = clusters[args.source]
+    except KeyError:
+        parser.error(
+            'source cluster name is not configured '
+            '(use one of: {})'.format(
+                ', '.join(sorted(clusters.keys()))))
+    else:
+        try:
+            args.source.ping()
+        except Exception as e:
+            parser.error(
+                'source cluster {!r} is unavailable: {}: {}'.format(
+                    args.source.name, type(e).__name__, e.args[0]))
+
+    try:
+        args.destination = clusters[args.destination]
+    except KeyError:
+        parser.error(
+            'destination cluster name is not configured '
+            '(use one of: {})'.format(
+                ', '.join(sorted(clusters.keys()))))
+    else:
+        try:
+            args.destination.ping()
+        except Exception as e:
+            parser.error(
+                'destination cluster {!r} is unavailable: {}: {}'.format(
+                    args.destination.name, type(e).__name__, e.args[0]))
+
+    return args
+
+
+def main():
+    options = load_config()
+    source, dest = options.source, options.destination
+
+    # Iterate over all VMs before we start.
+    try:
+        vms = []
+        for vm_name in options.vm:
+            # Check that there doesn't exist one on the destination already.
+            try:
+                dest.get_vm(vm_name)
+            except ProxmoxVm.DoesNotExist:
+                pass
+            else:
+                raise ProxmoxVm.Error(
+                    'VM {!r} exists on destination already'.format(
+                        vm_name))
+
+            # Get the current one.
+            vm = source.get_vm(vm_name)
+            vms.append(vm)
+    except ProxmoxVm.Error as e:
+        print('error: {}'.format(e), file=sys.stderr)
+        print('aborting', file=sys.stderr)
+        sys.exit(1)
+
+    # Config and notes:
+    # {'bootdisk': 'virtio0',
+    #  'cores': 8,
+    #  'digest': 'XXXXXXXXXXXXXXXXcfa3e49c8568312e7d148505',
+    #  # v-- should remove CDROM
+    #  'ide2': 'san06:iso/debian-8.0.0-amd64-netinst.iso,media=cdrom',
+    #  'memory': 4096,
+    #  'name': 'jessie-builder.example.com',
+    #  # v-- vmbr138 will work fine as long as cluster is in same location
+    #  'net0': 'virtio=XX:XX:XX:XX:8B:22,bridge=vmbr138',
+    #  # v-- is constant (apparently?)
+    #  'ostype': 'l26',
+    #  'smbios1': 'uuid=XXXXXXXX-XXXX-XXXX-8712-e68a063d993e,'
+    #             'manufacturer=example,product=jessie-builder',
+    #  'sockets': 1,
+    #  # v-- should move disk, to something like
+    #        "virtio0: mc9-5-local-ssd:vm-114-disk-1,size=50G"
+    #  'virtio0': 'san08:520/vm-520-disk-1.qcow2,format=qcow2,iops_rd=5000,'
+    #             'iops_wr=400,size=50G'}
+    #
+    # Translations on new:
+    # - '(ide|virtio)\d+': s/.*,media=cdrom/none,media=cdrom/
+    # Translations on old:
+    # - 'name': s/.*/&--MIGRATED/
+    #
+    # Steps:
+    # - translate old config to new config
+    # - create new config on nodeX on dest (random for now, later --node=node)
+    # - stop old host
+    # - translate old config on source (rename to --MIGRATED) (add comment?)
+    print('Moving from', source, 'to', dest)
+    translator = DefaultConfigTranslator()
+    for src_vm in vms:
+        print('-', src_vm.name)
+        print('  source', src_vm)
+        dst_config = translator.config(src_vm.get_config())
+        dst_vm = dest.create_vm(src_vm.type, dst_config, nodeid=None)
+        print('  destination', dst_vm)
+        print('  stopping', src_vm)
+        src_vm.stop()
+        print('  stopped', src_vm)
+        src_vm.add_comment('{} UTC: Migrated to {}'.format(
+            datetime.utcnow(), dst_vm))
+        print('  commented', src_vm)
+        src_vm.rename(src_vm.name + '--MIGRATED')
+        print('  renamed', src_vm)
+
+
+if __name__ == '__main__':
+    main()
