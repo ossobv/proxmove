@@ -2,8 +2,9 @@ Changes
 -------
 
 * **v0.0.5** - 2016-08-30
-  
-  - Added support for ZFS to ZFS. Now we support QCOW2->ZFS and ZFS->ZFS.
+
+  - Added support for ZFS to ZFS disk copy. QCOW2 to ZFS and ZFS to ZFS
+    is now tested.
 
 * **v0.0.4** - 2016-08-30
 
