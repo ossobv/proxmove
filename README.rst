@@ -46,7 +46,7 @@ When configured, you can do something like this:
 
 .. code-block:: console
 
-    $ ./proxmove banana-cluster the-new-cluster node2 node2-ssd the-vm-to-move
+    $ proxmove banana-cluster the-new-cluster node2 node2-ssd the-vm-to-move
     12:12:27: Move banana-cluster<e1400248> => the-new-cluster<6669ad2c> (node 'node2'): the-vm-to-move
     12:12:27: - source VM the-vm-to-move@node1<qemu/565/running>
     12:12:27: - storage 'ide2': None,media=cdrom (blobsize=None)
@@ -62,8 +62,8 @@ When configured, you can do something like this:
     Warning: Permanently added 'node2.the-new-cluster.com' (ECDSA) to the list of known hosts.
     vm-565-disk-1.qcow2   100%   50GB   90.5MB/s   09:26
     Connection to san.banana-cluster.com closed.
-    12:22:08,731: INFO: Temp data '/node2-ssd/temp/temp-proxmove/vm-126-virtio0' on local-ssd
-    12:22:08,936: INFO: Writing data from temp '/node2-ssd/temp/temp-proxmove/vm-126-virtio0' to '/dev/zvol/node2-ssd/vm-126-virtio0' (on local-ssd)
+    12:22:08: Temp data '/node2-ssd/temp/temp-proxmove/vm-126-virtio0' on local-ssd
+    12:22:08: Writing data from temp '/node2-ssd/temp/temp-proxmove/vm-126-virtio0' to '/dev/zvol/node2-ssd/vm-126-virtio0' (on local-ssd)
         (100.00/100%)
     Connection to node2.the-new-cluster.com closed.
     12:24:25: Removing temp '/node2-ssd/temp/temp-proxmove/vm-126-virtio0' (on local-ssd)
@@ -80,7 +80,7 @@ The ``the-vm-to-move`` on the ``banana-cluster`` has been stopped and renamed to
 Configuration
 -------------
 
-Set up the ``~/.proxmoverc`` config file. You first need to define which
+Set up the ``~/.proxmoverc`` config file. First you need to define which
 clusters you have. For example *banana-cluster* and *the-new-cluster*.
 
 .. code-block:: ini
@@ -95,8 +95,9 @@ clusters you have. For example *banana-cluster* and *the-new-cluster*.
     [pve:the-new-cluster]
     api=https://user@pve:PASSWORD@the-new-cluster.com:443
 
-And then it needs configuration for the storage devices. They are expected
-to be reached over SSH.
+Next, it needs configuration for the storage devices. They are expected
+to be reachable over SSH; both from the caller and from each other
+(using SSH-agent forwarding).
 
 The following defines two storage devices for the *banana-cluster*, one shared
 and one local to *node1* only.
@@ -135,7 +136,7 @@ Note that the ``temp=`` path is always a regular path.
     path=zfs:node2-ssd
     temp=/node2-ssd/temp
 
-The config file looks better with indentation. A suggested layout would be this:
+The config file looks better with indentation. The author suggests this layout:
 
 .. code-block:: ini
 
