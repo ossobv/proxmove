@@ -8,13 +8,15 @@ with open('proxmove') as fp:
             break
 with open('README.rst') as fp:
     long_description = fp.read()
+with open('CHANGES.rst') as fp:
+    long_description += '\n\n' + fp.read()
 
 
 setup(
     name='proxmove',
     version=version,
     scripts=['proxmove'],
-    data_files=[('', ['README.rst', 'proxmoverc.sample'])],
+    data_files=[('', ['README.rst', 'CHANGES.rst', 'proxmoverc.sample'])],
     description=(
         'Migrate virtual machines between different Proxmox VM clusters'),
     long_description=long_description,

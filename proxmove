@@ -29,16 +29,25 @@ from urllib.parse import urlparse
 __author__ = 'Walter Doekes'
 __copyright__ = 'Copyright (C) Walter Doekes, OSSO B.V. 2016'
 __licence__ = 'GPLv3+'
-__version__ = '0.0.4'
-
-log = logging.getLogger('proxmove')
+__version__ = '0.0.5'
 
 # TODO:
-# - rename VOLUME_KEYS
 # - see NotImplementedError
 # - see other TODO :D
 # - split up into files?
-VOLUME_KEYS = ('ide', 'sata', 'scsi', 'virtio')
+
+log = logging.getLogger('proxmove')
+
+# Drop LC_* from environment.
+environ = os.environ
+for key in list(environ.keys()):
+    if key.startswith('LC_'):
+        del environ[key]
+
+SUFFIX_CLONING = '--CLONING'    # source, when cloning
+SUFFIX_CREATING = '--CREATING'  # dest, while cloning
+SUFFIX_MIGRATED = '--MIGRATED'  # source, when done
+PROXMOX_VOLUME_TYPES = ('ide', 'sata', 'scsi', 'virtio')
 
 
 class ArgumentParser14191(argparse.ArgumentParser):
@@ -193,7 +202,7 @@ class ProxmoxCluster(object):
 
     def get_nodes(self):
         if 'nodes' not in self._cache:
-            tmp = self.proxmoxapi.nodes.get()
+            tmp = self.api.nodes.get()
             nodes = [
                 node['node'] for node in tmp
                 if node.get('uptime') and node['type'] == 'node']
@@ -213,19 +222,19 @@ class ProxmoxCluster(object):
         return ret
 
     @property
-    def proxmoxapi(self):
-        if not hasattr(self, '_proxmoxapi'):
+    def api(self):
+        if not hasattr(self, '_api'):
             try:
                 res = urlparse(self.api_url)
             except InvalidURL as e:
                 raise ValueError(
                     'splitting {!r} api {!r} URL failed: {}'.format(
                         self.name, self.api_url, e))
-            proxmox = ProxmoxAPI(
+            api = ProxmoxAPI(
                 res.hostname, port=res.port, user=res.username,
                 password=res.password, verify_ssl=True)
-            self._proxmoxapi = proxmox
-        return self._proxmoxapi
+            self._api = api
+        return self._api
 
     def create_vm(self, type_, config, nodeid):
         if not nodeid:
@@ -239,8 +248,9 @@ class ProxmoxCluster(object):
         mutable_config = {}
         for key, value in config.items():
             if key == 'name':
-                mutable_config[key] = '{}--MIGRATING'.format(value)
-            elif re.match('^({})\d+$'.format('|'.join(VOLUME_KEYS)), key):
+                mutable_config[key] = value + SUFFIX_CREATING
+            elif re.match(
+                    '^({})\d+$'.format('|'.join(PROXMOX_VOLUME_TYPES)), key):
                 # Wipe it. We'll add the disks manually later on.
                 pass
             else:
@@ -248,7 +258,7 @@ class ProxmoxCluster(object):
 
         # Guess new VMID and create one.
         vmid = self.get_free_vmid()
-        api_node = self.proxmoxapi.nodes(nodeid)
+        api_node = self.api.nodes(nodeid)
         vmhash = getattr(api_node, type_).create(vmid=vmid, **mutable_config)
 
         # Wait a while to ensure that we get the VM.
@@ -273,19 +283,16 @@ class ProxmoxCluster(object):
 
     def get_vms_dict(self):
         if 'cluster.resources.type=vm' not in self._cache:
-            vms = self._cache['cluster.resources.type=vm'] = (
-                self.proxmoxapi.cluster.resources.get(type='vm'))
-        else:
-            vms = self._cache['cluster.resources.type=vm']
-        return vms
+            self._cache['cluster.resources.type=vm'] = (
+                self.api.cluster.resources.get(type='vm'))
+        return self._cache['cluster.resources.type=vm']
 
     def get_free_vmid(self):
         """
         BEWARE: To get the numbers right, we need to have enough
-        permissions to see all.
-
-        TODO: Make sure we bypass the cache? Stale VMIDs are not nice.
+        permissions to see all VMs. PVEVMAdmin permissions required?
         """
+        self._cache = {}  # purge cache, so we don't get stale VMID lists
         vms = self.get_vms_dict()
         if not vms:
             return 100
@@ -319,11 +326,11 @@ class ProxmoxCluster(object):
                 'VM named {!r} found multiple times in cluster {!r}'.format(
                     name, self.name))
         vm = self._vms[name] = ProxmoxVm.from_dict(
-            res[0], api=self.proxmoxapi, cluster=self)
+            res[0], api=self.api, cluster=self)
         return vm
 
     def ping(self):
-        version = self.proxmoxapi.version.get()
+        version = self.api.version.get()
         if not isinstance(version, dict) or 'release' not in version:
             raise ProxmoxVm.Error(
                 'cluster {!r} did not return proper version: {!r}'.format(
@@ -523,7 +530,7 @@ class ProxmoxVm(object):
         if 'volumes' not in self._cache:
             volumes = {}
             for key, value in self.get_config().items():
-                if key.startswith(VOLUME_KEYS):
+                if key.startswith(PROXMOX_VOLUME_TYPES):
                     location, properties = value.split(',', 1)
                     if location == 'none':
                         volume = ProxmoxVolume(None, properties)
@@ -639,13 +646,24 @@ class ProxmoxVolume(object):
             # standardized across BSD/GNU.
             try:
                 data = self.storage.ssh_command(
-                    ['ls', '-l', path], hide_stderr=True)
+                    ['ls', '-lh', path], hide_stderr=True)
             except subprocess.CalledProcessError:
                 ret['size'] = None
             else:
-                ret['size'] = int(data.split()[4])
+                ret['size'] = data.split()[4].decode('ascii', 'replace')  # str
+        elif self.storage.type == 'zfs':
+            temp_snapname = '{}/{}@temp-{}'.format(
+                self.storage.path, self.location, random.random())
+            data = self.storage.ssh_command(
+                ['zfs', 'snapshot', temp_snapname, ';'
+                 'zfs', 'send', '-Rnv', temp_snapname, ';',
+                 'zfs', 'destroy', temp_snapname], hide_stderr=True)
+            parts = data.split()
+            if parts:
+                ret['size'] = parts[-1].decode('ascii', 'replace')
         else:
-            raise NotImplementedError('zfs')
+            raise NotImplementedError(
+                'unsupported storage type {!r}'.format(self.storage.type))
 
         return ret
 
@@ -682,21 +700,31 @@ class ProxmoxVolume(object):
             self.storage.ssh_command(
                 ['scp', '-o', 'StrictHostKeyChecking=no',
                  source_path, scp_dest], tty=True)
-        else:
+        elif self.storage.type == 'zfs':
             # *from* ZFS
-            # zfs send pool0-pve1-ssd/vm-102-disk-1@pve7 | pv |
-            #   ssh 10.91.65.14 zfs recv pool0-pve7-ssd/vm-102-disk-1 -F
-            raise NotImplementedError(self.storage.type)
+            if new_storage.type == 'zfs':
+                # We'll use ZFS send/recv.
+                temp_dest_path = None
+            else:
+                # TODO: Simply cat /dev/zvol/.../... to the destfile?
+                raise NotImplementedError(
+                    'volume conversion from zfs to {!r} '
+                    'not implemented'.format(new_storage.type))
+        else:
+            raise NotImplementedError(
+                'volume conversion from {!r} not implemented'.format(
+                    self.storage.type))
 
         # We now have temp data at: temp_dest_path
-        log.info('Temp data {!r} on {}'.format(
-            temp_dest_path, new_storage))
+        if temp_dest_path:
+            log.info('Temp data {!r} on {}'.format(
+                temp_dest_path, new_storage))
 
         # Create room for new storage.
         if new_storage.type == 'plain':
             if old_format != 'qcow2':
                 raise NotImplementedError(
-                    'conversion from {!r} not implemented yet?'.format(
+                    'format conversion from {!r} not implemented'.format(
                         old_format))
             new_format = 'qcow2'
 
@@ -722,28 +750,50 @@ class ProxmoxVolume(object):
         elif new_storage.type == 'zfs':
             # *to* ZFS
             zfs_name = '{}/{}'.format(new_storage.path, new_name)
-            new_storage.ssh_command(
-                ['zfs', 'create', '-V', self.get_property('size'), zfs_name])
-            dest_path = os.path.join(
-                '/dev/zvol', new_storage.path, new_name)
-            log.info('Writing data from temp {!r} to {!r} (on {})'.format(
-                temp_dest_path, dest_path, new_storage))
 
-            if old_format is None:
-                old_format = 'raw'
-            if old_format in ('qcow2', 'raw'):
+            if self.storage.type == 'zfs':
+                # *from* ZFS *to* ZFS
+                src_zfs_name = '{}/{}@proxmove-{}'.format(
+                    self.storage.path, self.location,
+                    datetime.now().strftime('%y%m%d-%H%M%S'))
+                log.info('Copying data from {!r} to {!r} (on {})'.format(
+                    src_zfs_name, zfs_name, new_storage))
+
+                self.storage.ssh_command(
+                    ['zfs', 'snapshot', src_zfs_name])
+                self.storage.ssh_command(
+                    ['zfs', 'send', '-Rv', src_zfs_name, '|',
+                     'ssh', '-o', 'StrictHostKeyChecking=no',
+                     new_storage.ssh, 'zfs', 'recv', zfs_name], tty=True)
+            elif temp_dest_path:
+                # *from* plain (raw? qcow2?) *to* ZFS
                 new_storage.ssh_command(
-                    # -n = no create volume
-                    # -p = progress
-                    ['qemu-img', 'convert', '-n', '-p', '-f', old_format,
-                     '-O', 'raw', temp_dest_path, dest_path], tty=True)
-                log.info('Removing temp {!r} (on {})'.format(
-                    temp_dest_path, new_storage))
-                new_storage.ssh_command(['rm', temp_dest_path])
+                    ['zfs', 'create', '-V', self.get_property('size'),
+                     zfs_name])
+                dest_path = os.path.join(
+                    '/dev/zvol', new_storage.path, new_name)
+                log.info('Writing data from temp {!r} to {!r} (on {})'.format(
+                    temp_dest_path, dest_path, new_storage))
+
+                if old_format is None:
+                    old_format = 'raw'
+                if old_format in ('qcow2', 'raw'):
+                    new_storage.ssh_command(
+                        # -n = no create volume
+                        # -p = progress
+                        ['qemu-img', 'convert', '-n', '-p', '-f', old_format,
+                         '-O', 'raw', temp_dest_path, dest_path], tty=True)
+                    log.info('Removing temp {!r} (on {})'.format(
+                        temp_dest_path, new_storage))
+                    new_storage.ssh_command(['rm', temp_dest_path])
+                else:
+                    raise NotImplementedError(
+                        'format conversion from {!r} not implemented'.format(
+                            old_format))
             else:
                 raise NotImplementedError(
-                    'format conversion from {!r} not implemented'.format(
-                        old_format))
+                    'volume conversion from {!r} not implemented'.format(
+                        self.storage.type))
 
             cloned_volume = ProxmoxVolume(
                 new_name, self.get_properties_without('format'),
@@ -951,10 +1001,10 @@ def main():
     #
     # Steps:
     # - translate old config to new config
-    # - create new config on nodeX on dest (no disks, MIGRATING name)
-    # - stop old host, rename to MIGRATING
+    # - create new config on nodeX on dest (no disks, "CREATING" name)
+    # - stop old host, rename to "CLONING"
     # - move all disks, one by one
-    # - rename dest to real name, rename source to MIGRATED, add comment
+    # - rename dest to real name, rename source to "MIGRATED", add comment
     translator = DefaultConfigTranslator()
     for src_vm in vms:
         log.info('Move {} => {} (node {!r}): {}'.format(
@@ -972,11 +1022,11 @@ def main():
             dst_config = translator.config(src_vm.get_config())
             dst_vm = dst_pve.create_vm(
                 src_vm.type, dst_config, nodeid=dst_node)
-            # dst_vm = dst_pve.get_vm(src_vm_name + '--MIGRATING')
+            # dst_vm = dst_pve.get_vm(dst_config['name'] + SUFFIX_CREATING)
 
             # Stop old VM, create storage, copy storage.
             src_vm.ensure_stopped()
-            src_vm.rename(src_vm_name + '--MIGRATING')
+            src_vm.rename(src_vm_name + SUFFIX_CLONING)
             for key, volume in src_vm.get_volumes().items():
                 if key not in dst_vm.get_volumes():
                     if volume.is_removable():
@@ -987,8 +1037,8 @@ def main():
                             key, volume, storage=dst_storage)
 
             # Done? Rename both.
-            dst_vm.rename(src_vm_name)
-            src_vm.rename(src_vm_name + '--MIGRATED')
+            dst_vm.rename(dst_config['name'])
+            src_vm.rename(src_vm_name + SUFFIX_MIGRATED)
             src_vm.add_comment('{} UTC: Migrated to {}'.format(
                 datetime.utcnow(), dst_vm))
 
