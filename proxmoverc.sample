@@ -1,0 +1,59 @@
+; PVE clusters should to be specified as follows.
+;
+;   [pve:CLUSTER_ALIAS]
+;   ; The API must be reachable over HTTPS. The USER needs PVEVMAdmin
+;   ; powers on '/' in your PVE cluster.
+;   api=https://USER@pve:PASSWORD@HOST:PORT
+;
+; The PVE clusters have one or more storage devices that must be
+; reachable over SSH. When moving data between storage devices, the
+; data is first copied to the `temp` location on the destination storage
+; and then converted to the correct format.
+;
+; Every cluster needs at least one storage device. Some may be shared
+; across nodes, others exist on a single node only.
+;
+; If the path is a plain path, file-based images are used. If the path
+; starts with "zfs:", it is considered to be a zfs pool.
+;
+;     [storage:CLUSTER_ALIAS:DISK_NAME[@NODE_NAME]]
+;     ssh=root@HOST
+;     path=/path/to/somewhere   ; for plain disk (DISK_NAME:VMID/...), or
+;     path=zfs:ZFS_POOL_NAME    ; for ZFS (DISK_NAME:vm-VMID-disk-1)
+
+; Example cluster named "banana-cluster" with 3 storage devices, one
+; shared, and two which exist on a single node only.
+[pve:banana-cluster]
+api=https://user@pve:PASSWORD@banana-cluster.com:443
+
+  [storage:banana-cluster:sharedsan] ; "sharedsan" is available on all nodes
+  ssh=root@san.banana-cluster.com
+  path=/pool0/san/images
+  temp=/pool0/san/private
+
+  [storage:banana-cluster:local@node1] ; local disk on node1 only
+  ssh=root@node1.banana-cluster.com
+  path=/srv/images
+  temp=/srv/temp
+
+  [storage:banana-cluster:local@node2] ; other local disk on node2 only
+  ssh=root@node2.banana-cluster.com
+  path=/srv/images
+  temp=/srv/temp
+
+; Example cluster named "the-new-cluster" with 2 storage devices; both
+; storage devices exist on the respective nodes only.
+[pve:the-new-cluster]
+api=https://user@pve:PASSWORD@the-new-cluster.com:443
+
+  [storage:the-new-cluster:node1-ssd@node1]
+  ssh=root@node1.the-new-cluster.com
+  path=zfs:node1-ssd
+  temp=/node1-ssd/temp
+
+  [storage:the-new-cluster:node2-ssd@node2]
+  ssh=root@node2.the-new-cluster.com
+  path=zfs:node2-ssd
+  temp=/node2-ssd/temp
+
+; vim: set syn=cfg:

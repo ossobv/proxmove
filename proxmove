@@ -12,19 +12,33 @@ version.
 """
 import argparse
 import configparser
+import logging
+import logging.config
 import os
 import random
 import re
+import subprocess
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime
 from proxmoxer import ProxmoxAPI
+from http.client import InvalidURL
 from urllib.parse import urlparse
 
 __author__ = 'Walter Doekes'
 __copyright__ = 'Copyright (C) Walter Doekes, OSSO B.V. 2016'
 __licence__ = 'GPLv3+'
-__version__ = '0.0.3'
+__version__ = '0.0.4'
+
+log = logging.getLogger('proxmove')
+
+# TODO:
+# - rename VOLUME_KEYS
+# - see NotImplementedError
+# - see other TODO :D
+# - split up into files?
+VOLUME_KEYS = ('ide', 'sata', 'scsi', 'virtio')
 
 
 class ArgumentParser14191(argparse.ArgumentParser):
@@ -91,8 +105,10 @@ class ArgumentParser14191(argparse.ArgumentParser):
 class ProxmoxClusters(dict):
     @classmethod
     def from_filename(cls, filename):
-        proxmoxclusters = cls()
-        parser = configparser.ConfigParser(interpolation=None)
+        clusters = cls()
+        parser = configparser.ConfigParser(
+            interpolation=None, inline_comment_prefixes=('#', ';'),
+            empty_lines_in_values=False)
 
         try:
             with open(filename) as fp:
@@ -109,12 +125,32 @@ class ProxmoxClusters(dict):
         for section in parser.sections():
             if section == configparser.DEFAULTSECT:
                 raise ValueError(
-                    'Defaults in {!r}? Why?'.format(section))
+                    'unexpected default section: {}'.format(section))
 
-            proxmoxclusters[section] = ProxmoxCluster.from_section(
-                section, parser.items(section))
+            section_split = section.split(':')
+            type_ = section_split.pop(0)
 
-        return proxmoxclusters
+            # [pve:CLUSTER_ALIAS]
+            if type_ == 'pve' and len(section_split) == 1:
+                cluster_alias = section_split[0]
+                clusters[cluster_alias] = ProxmoxCluster.from_section(
+                    cluster_alias, parser.items(section))
+            # [storage:CLUSTER_ALIAS:STORAGE_NAME[@NODE]]
+            elif type_ == 'storage' and len(section_split) == 2:
+                cluster_alias = section_split[0]
+                if cluster_alias not in clusters:
+                    raise ValueError(
+                        'storage describing unknown cluster {!r}: {}'.format(
+                            cluster_alias, section))
+                clusters[cluster_alias].add_storage(
+                    section_split[1], parser.items(section))
+            # [...]
+            else:
+                raise ValueError(
+                    'unknown section type; use pve/storage: {}'.format(
+                        section))
+
+        return clusters
 
 
 class ProxmoxCluster(object):
@@ -123,17 +159,15 @@ class ProxmoxCluster(object):
         cluster = cls(name)
 
         for key, value in section:
-
-            if key in cluster._data:
-                raise ValueError(
-                    'Duplicate key {!r} in section {!r}'.format(
-                        key, name))
-
-            if key == 'proxmoxapi':
-                cluster._data[key] = value
+            if key == 'api':
+                if cluster.api_url:
+                    raise ValueError(
+                        'duplicate api key in pve section {!r}'.format(
+                            name))
+                cluster.api_url = value
             else:
                 raise ValueError(
-                    'Unknown key {!r} in section {!r}'.format(
+                    'unknown key {!r} in pve section {!r}'.format(
                         key, name))
 
         return cluster
@@ -141,20 +175,52 @@ class ProxmoxCluster(object):
     def __init__(self, name):
         self.name = name
         self.repoid = None
-        self._data = {}
-        self._proxmox_cache = {}
+        self.api_url = None
+        self._cache = {}
+        self._storages = {}
+        self._storages_nodespecific = defaultdict(dict)
         self._vms = {}
+
+    def add_storage(self, name, section):
+        try:
+            name, node = name.split('@', 1)
+        except ValueError:
+            storage = ProxmoxStorage.from_section(name, section)
+            self._storages[name] = storage
+        else:
+            storage = ProxmoxStorage.from_section(name, section)
+            self._storages_nodespecific[node][name] = storage
+
+    def get_nodes(self):
+        if 'nodes' not in self._cache:
+            tmp = self.proxmoxapi.nodes.get()
+            nodes = [
+                node['node'] for node in tmp
+                if node.get('uptime') and node['type'] == 'node']
+            self._cache['nodes'] = nodes
+        return self._cache['nodes']
+
+    def get_storage(self, node, storage):
+        ret = None
+        if node in self._storages_nodespecific:
+            ret = self._storages_nodespecific[node].get(storage)
+        if not ret:
+            ret = self._storages.get(storage)
+        if not ret:
+            raise ValueError(
+                'storage {!r} in {!r} cluster missing in config'.format(
+                    storage, self.name))
+        return ret
 
     @property
     def proxmoxapi(self):
         if not hasattr(self, '_proxmoxapi'):
-            uri = self._data.get('proxmoxapi', '')
             try:
-                res = urlparse(uri)
-            except AssertionError as e:
+                res = urlparse(self.api_url)
+            except InvalidURL as e:
                 raise ValueError(
-                    'splitting {!r} proxmoxapi {!r} URI failed: {}'.format(
-                        self.name, uri, e))
+                    'splitting {!r} api {!r} URL failed: {}'.format(
+                        self.name, self.api_url, e))
             proxmox = ProxmoxAPI(
                 res.hostname, port=res.port, user=res.username,
                 password=res.password, verify_ssl=True)
@@ -165,17 +231,34 @@ class ProxmoxCluster(object):
         if not nodeid:
             nodeid = self.get_random_node()
 
+        log.info('Creating new VM {!r} on {!r}, node {!r}'.format(
+            config['name'], self.name, nodeid))
+
+        # Create disks according to config. Temporarily set ide\d+ and
+        # virtio\d+ devices to none until we can get them copied over.
+        mutable_config = {}
+        for key, value in config.items():
+            if key == 'name':
+                mutable_config[key] = '{}--MIGRATING'.format(value)
+            elif re.match('^({})\d+$'.format('|'.join(VOLUME_KEYS)), key):
+                # Wipe it. We'll add the disks manually later on.
+                pass
+            else:
+                mutable_config[key] = value
+
+        # Guess new VMID and create one.
         vmid = self.get_free_vmid()
-        node = self._proxmoxapi.nodes(nodeid)
-        vm = getattr(node, type_).create(vmid=vmid, **config)
-        del vm  # some kind of creation hash; we don't need it
-        # Purge cache after write operation!
-        self._proxmox_cache = {}
+        api_node = self.proxmoxapi.nodes(nodeid)
+        vmhash = getattr(api_node, type_).create(vmid=vmid, **mutable_config)
 
         # Wait a while to ensure that we get the VM.
+        log.info(
+            '- created new VM {!r} as {}; waiting for it to show up'.format(
+                mutable_config['name'], vmhash))
         for i in range(30):
             try:
-                vm = self.get_vm(config['name'])
+                self._cache = {}  # purge cache, we expect changes
+                vm = self.get_vm(mutable_config['name'])
             except ProxmoxVm.DoesNotExist:
                 pass
             else:
@@ -183,21 +266,25 @@ class ProxmoxCluster(object):
             time.sleep(1)
         else:
             raise ProxmoxVm.Error('Could not get newly created VM {!r}'.format(
-                config['name']))
+                mutable_config['name']))
+
+        log.info('- created new VM {!r}: {}'.format(vm.name, vm))
         return vm
 
     def get_vms_dict(self):
-        if 'cluster.resources.type=vm' not in self._proxmox_cache:
-            vms = self._proxmox_cache['cluster.resources.type=vm'] = (
+        if 'cluster.resources.type=vm' not in self._cache:
+            vms = self._cache['cluster.resources.type=vm'] = (
                 self.proxmoxapi.cluster.resources.get(type='vm'))
         else:
-            vms = self._proxmox_cache['cluster.resources.type=vm']
+            vms = self._cache['cluster.resources.type=vm']
         return vms
 
     def get_free_vmid(self):
         """
         BEWARE: To get the numbers right, we need to have enough
         permissions to see all.
+
+        TODO: Make sure we bypass the cache? Stale VMIDs are not nice.
         """
         vms = self.get_vms_dict()
         if not vms:
@@ -215,19 +302,12 @@ class ProxmoxCluster(object):
             ordered_vms))
 
     def get_random_node(self):
-        if 'nodes' not in self._proxmox_cache:
-            nodes = self._proxmox_cache['nodes'] = (
-                self.proxmoxapi.nodes.get())
-        else:
-            nodes = self._proxmox_cache['nodes']
-        nodes = [
-            node['node'] for node in nodes
-            if node.get('uptime') and node['type'] == 'node']
+        nodes = self.get_nodes()
         return random.choice(nodes)
 
     def get_vm(self, name):
         if name in self._vms:
-            return self._vms['name']
+            return self._vms[name]
         proxmox_vms = self.get_vms_dict()
         res = [vm for vm in proxmox_vms if vm.get('name') == name]
         if len(res) == 0:
@@ -238,7 +318,8 @@ class ProxmoxCluster(object):
             raise ProxmoxVm.Error(
                 'VM named {!r} found multiple times in cluster {!r}'.format(
                     name, self.name))
-        vm = self._vms[name] = ProxmoxVm.from_dict(res[0], self.proxmoxapi)
+        vm = self._vms[name] = ProxmoxVm.from_dict(
+            res[0], api=self.proxmoxapi, cluster=self)
         return vm
 
     def ping(self):
@@ -255,6 +336,112 @@ class ProxmoxCluster(object):
         return self.name
 
 
+class ProxmoxStorage(object):
+    @classmethod
+    def from_section(cls, name, section):
+        storage = cls(name)
+
+        for key, value in section:
+            if key == 'ssh':
+                storage.set_ssh(value)
+            elif key == 'path':
+                storage.set_path(value)
+            elif key == 'temp':
+                storage.set_temp(value)
+
+        if not storage.is_complete():
+            raise ValueError(
+                'storage section {!r} is incomplete (needs ssh/path)'.format(
+                    name))
+
+        return storage
+
+    def __init__(self, name):
+        self.name = name
+        self.ssh = None
+        self.type = None
+        self.path = None
+        self.temp = None
+
+    def run_command(self, command, hide_stderr=False, tty=False):
+        kwargs = {}
+        if tty:
+            kwargs['stdin'] = sys.stdin
+            kwargs['stdout'] = sys.stdout
+            kwargs['stderr'] = sys.stderr
+        if hide_stderr:
+            kwargs['stderr'] = subprocess.DEVNULL
+
+        if tty:
+            # We don't need to catch KeyboardInterrupt and SystemExit
+            # now that we have ssh -t.
+            proc = subprocess.Popen(command, **kwargs)
+            status = proc.wait()
+            if status != 0:
+                raise subprocess.CalledProcessError(
+                    returncode=status, cmd=command,
+                    output='Failure with status {}'.format(status))
+            return ''
+        else:
+            return subprocess.check_output(command, **kwargs)
+
+    def ssh_command(self, command, hide_stderr=False, tty=False):
+        extra = []
+        if tty:
+            extra.append('-t')
+        return self.run_command(
+            # We could auto-add host key using StrictHostKeyChecking=no,
+            # but I'm not sure we want to.
+            ['ssh', '-A',  # '-o', 'StrictHostKeyChecking=no',
+             self.ssh] + extra + command, hide_stderr=hide_stderr, tty=tty)
+
+    def get_volume(self, location, properties):
+        return ProxmoxVolume(location, properties, storage=self)
+
+    def set_ssh(self, value):
+        if self.ssh:
+            raise ValueError(
+                'duplicate ssh key in {!r} storage section: {}'.format(
+                    self.name, value))
+        if value.startswith('-'):
+            raise ValueError(
+                'ssh value cannot start with an option-dash in {!r} '
+                'storage section: {}'.format(self.name, value))
+        self.ssh = value
+
+    def set_path(self, value):
+        if self.type:
+            raise ValueError(
+                'duplicate path key in {!r} storage section: {}'.format(
+                    self.name, value))
+        if value.startswith('/'):
+            self.type = 'plain'
+            self.path = value
+        elif value.startswith('zfs:'):
+            self.type, self.path = value.split(':', 1)
+            if ':' in self.path or '/' in self.path:
+                raise ValueError(
+                    'unexpected tokens in zfs pool in {!r} storage '
+                    'section: {}'.format(self.name, value))
+
+    def set_temp(self, value):
+        if self.temp:
+            raise ValueError(
+                'duplicate temp key in {!r} storage section: {}'.format(
+                    self.name, value))
+        if not value.startswith('/'):
+            raise ValueError(
+                'unexpected tokens in temp path in {!r} storage '
+                'section: {}'.format(self.name, value))
+        self.temp = value
+
+    def is_complete(self):
+        return self.ssh and self.type and self.path and self.temp
+
+    def __str__(self):
+        return self.name
+
+
 class ProxmoxVm(object):
     class Error(ValueError):
         pass
@@ -263,31 +450,34 @@ class ProxmoxVm(object):
         pass
 
     @classmethod
-    def from_dict(cls, dict_, proxmoxapi):
-        vm = cls()
-        vm.name = dict_['name']
-        vm.node = dict_['node']
-        vm.type = dict_['type']  # qemu|lxc|...
-        vm.id = dict_['vmid']
-        vm.status = dict_['status']  # "running"
-        vm._proxmoxapi = proxmoxapi
-
-        # Get config immediately, checks for pending changes too.
-        vm.get_config()
+    def from_dict(cls, dict_, api, cluster):
+        vm = cls(
+            dict_['name'], dict_['node'], dict_['type'], dict_['vmid'],
+            dict_['status'], api, cluster)
+        vm.get_config()  # get config and check for pending changes at once
         return vm
+
+    def __init__(self, name, node, type_, id_, status, api, cluster):
+        self.name = name
+        self.node = node
+        self.type = type_  # qemu|lxc|...
+        self.id = id_
+        self.status = status  # "running"/"stopped"
+        self.api = api
+        self.api_vm = getattr(api.nodes(node), type_)(id_)
+        self.cluster = cluster
+        self._cache = {}
 
     def get_config(self):
         """
         Get current configuration and check that the are no pending
         changes.
         """
-        if not hasattr(self, '_config'):
-            node = self._proxmoxapi.nodes(self.node)
-            vm = getattr(node, self.type)(self.id)
-            next_config = vm.config.get()
+        if 'config' not in self._cache:
+            next_config = self.api_vm.config.get()
 
             # Check pending.
-            pending_config = vm.pending.get()  # may not exist for lxc?
+            pending_config = self.api_vm.pending.get()  # may not exist for lxc
             pending = []
             for dict_ in pending_config:
                 keys = dict_.keys()
@@ -302,32 +492,98 @@ class ProxmoxVm(object):
                     'VM {!r} contains pending changes: {}'.format(
                         self.name, ', '.join(pending)))
 
-            self._config = next_config
-        return self._config
+            # Update values.
+            self.name = next_config['name']
+
+            self._cache['config'] = next_config
+        return self._cache['config']
+
+    def create_volume(self, key, source_volume, storage):
+        """
+        Create volume from source_volume.
+        """
+        if storage is None:
+            # Take properties and set first argument to 'none'.
+            # E.g. "san06:abc.iso,media=cdrom" => "none,media=cdrom"
+            parts = source_volume.properties.split(',', 1)
+            parts[0] = 'none'
+            properties = ','.join(parts)
+            self.api_vm.config.put(**{key: properties})
+            self._cache = {}
+            log.info('Ejected (cdrom?) volume {!r} ({}) added to {}'.format(
+                key, properties, self))
+        else:
+            # We actually have to do copying.
+            log.info('Begin copy of {!r} ({}) to {}'.format(
+                key, source_volume, storage))
+            new_volume = source_volume.clone(storage, self.id, key)
+            self.api_vm.config.put(**{key: new_volume.as_properties()})
+
+    def get_volumes(self):
+        if 'volumes' not in self._cache:
+            volumes = {}
+            for key, value in self.get_config().items():
+                if key.startswith(VOLUME_KEYS):
+                    location, properties = value.split(',', 1)
+                    if location == 'none':
+                        volume = ProxmoxVolume(None, properties)
+                    else:
+                        storage, location = location.split(':', 1)
+                        storage = self.cluster.get_storage(self.node, storage)
+                        volume = storage.get_volume(location, properties)
+                    volumes[key] = volume
+            self._cache['volumes'] = volumes
+        return self._cache['volumes']
 
     def rename(self, new_name):
-        node = self._proxmoxapi.nodes(self.node)
-        vm = getattr(node, self.type)(self.id)
-        vm.config.put(name=new_name)
+        self.api_vm.config.put(name=new_name)
         self.name = new_name
 
-    def stop(self, timeout=120):
-        node = self._proxmoxapi.nodes(self.node)
-        vm = getattr(node, self.type)(self.id)
-        # forceStop takes a boolean, but proxmoxer won't pass True as
-        # "true", but as True.
-        vm.status.shutdown.create(forceStop='1', timeout=timeout)
+    def ensure_started(self, timeout=120):
+        if self.status == 'running':
+            log.debug('Skipping start, already running: {}'.format(self))
+            return
+
+        log.info('Starting VM {}'.format(self))
+
+        self.api_vm.status.start.create()
         for i in range(timeout + 10):
             time.sleep(1)
-            status = vm.status.current.get()
+            status = self.api_vm.status.current.get()
+            if status['status'] == 'running':
+                self.status = status['status']
+                break
+        else:
+            self.status = status['status']
+            raise ProxmoxVm.Error(
+                'VM {!r} refuses to start: status = {!r}'.format(
+                    self.name, self.status))
+
+        log.info('- started VM {}'.format(self))
+
+    def ensure_stopped(self, timeout=120):
+        if self.status == 'stopped':
+            log.debug('Skipping stop, already stopped: {}'.format(self))
+            return
+
+        log.info('Stopping VM {}'.format(self))
+
+        # forceStop takes a boolean, but proxmoxer won't pass True as
+        # "true", but as True.
+        self.api_vm.status.shutdown.create(forceStop='1', timeout=timeout)
+        for i in range(timeout + 10):
+            time.sleep(1)
+            status = self.api_vm.status.current.get()
             if status['status'] == 'stopped':
-                self.status = 'stopped'
+                self.status = status['status']
                 break
         else:
             self.status = status['status']
             raise ProxmoxVm.Error(
                 'VM {!r} refuses to shut down: status = {!r}'.format(
                     self.name, self.status))
+
+        log.info('- stopped VM {}'.format(self))
 
     def add_comment(self, comment):
         config = self.get_config()
@@ -336,14 +592,186 @@ class ProxmoxVm(object):
         else:
             comment = comment.strip()
 
-        node = self._proxmoxapi.nodes(self.node)
-        vm = getattr(node, self.type)(self.id)
-        vm.config.put(description=comment)
-        del self._config  # drop cache
+        self.api_vm.config.put(description=comment)
+        self._cache = {}  # drop cache
 
     def __str__(self):
         return '{}@{}<{}/{}/{}>'.format(
             self.name, self.node, self.type, self.id, self.status)
+
+
+class ProxmoxVolume(object):
+    def __init__(self, location, properties, storage=None):
+        self.location = location
+        self.properties = properties
+        self.storage = storage
+
+    def is_removable(self):
+        parts = self.properties.split(',')
+        return self.location is None or 'media=cdrom' in parts
+
+    def get_property(self, what):
+        search = '{}='.format(what)
+        parts = self.properties.split(',')
+        for part in parts:
+            if part.startswith(search):
+                return part[len(search):]
+        return None
+
+    def get_properties_without(self, *without_list):
+        search_list = tuple('{}='.format(i) for i in without_list)
+        ret = []
+        parts = self.properties.split(',')
+        for part in parts:
+            if not part.startswith(search_list):
+                ret.append(part)
+        return ','.join(ret)
+
+    def get_info(self):
+        ret = {'size': None}
+
+        if not self.storage:
+            return ret
+
+        if self.storage.type == 'plain':
+            path = os.path.join(self.storage.path, self.location)
+            # Use ls -l instead of stat because stat %s/%z is not
+            # standardized across BSD/GNU.
+            try:
+                data = self.storage.ssh_command(
+                    ['ls', '-l', path], hide_stderr=True)
+            except subprocess.CalledProcessError:
+                ret['size'] = None
+            else:
+                ret['size'] = int(data.split()[4])
+        else:
+            raise NotImplementedError('zfs')
+
+        return ret
+
+    def clone(self, new_storage, new_vmid, new_key):
+        """
+        new_key could be "virtio0" or "ide2" or ...
+        """
+        new_name = 'vm-{}-{}'.format(new_vmid, new_key)
+        old_format = self.get_property('format')
+
+        # Copy data from old storage.
+        if self.storage.type == 'plain':
+            source_path = os.path.join(self.storage.path, self.location)
+            temp_dest_path = os.path.join(
+                new_storage.temp, 'temp-proxmove', new_name)
+            scp_dest = '{}:{}'.format(new_storage.ssh, temp_dest_path)
+            log.info('SCP copy from {!r} (on {}) to {!r}'.format(
+                source_path, self.storage, scp_dest))
+
+            # test if "temp" exists, and die if it doesn't
+            try:
+                new_storage.ssh_command(
+                    ['test', '-d', new_storage.temp])
+            except subprocess.CalledProcessError:
+                raise ValueError(
+                    'temp dir {!r} of san {!r} does not exist; '
+                    'please create it!'.format(
+                        new_storage.temp, new_storage.name))
+            # mkdir
+            new_storage.ssh_command(
+                ['mkdir', '-p', os.path.dirname(temp_dest_path)])
+            # scp, using ssh+scp instead of local-scp, so we can add our
+            # beloved options
+            self.storage.ssh_command(
+                ['scp', '-o', 'StrictHostKeyChecking=no',
+                 source_path, scp_dest], tty=True)
+        else:
+            # *from* ZFS
+            # zfs send pool0-pve1-ssd/vm-102-disk-1@pve7 | pv |
+            #   ssh 10.91.65.14 zfs recv pool0-pve7-ssd/vm-102-disk-1 -F
+            raise NotImplementedError(self.storage.type)
+
+        # We now have temp data at: temp_dest_path
+        log.info('Temp data {!r} on {}'.format(
+            temp_dest_path, new_storage))
+
+        # Create room for new storage.
+        if new_storage.type == 'plain':
+            if old_format != 'qcow2':
+                raise NotImplementedError(
+                    'conversion from {!r} not implemented yet?'.format(
+                        old_format))
+            new_format = 'qcow2'
+
+            rel_path = os.path.join(
+                    str(new_vmid), '{}.{}'.format(new_name, new_format))
+            dest_path = os.path.join(new_storage.path, rel_path)
+
+            log.info('Moving data from {!r} to {!r}'.format(
+                temp_dest_path, dest_path))
+
+            # mkdir
+            new_storage.ssh_command(
+                ['mkdir', '-p', os.path.dirname(dest_path)])
+            # mv
+            new_storage.ssh_command(
+                ['mv', temp_dest_path, dest_path])
+
+            # TODO: In case old_format != new_format, we need to update
+            # properties!
+            assert old_format == new_format
+            cloned_volume = ProxmoxVolume(
+                rel_path, self.properties, storage=new_storage)
+        elif new_storage.type == 'zfs':
+            # *to* ZFS
+            zfs_name = '{}/{}'.format(new_storage.path, new_name)
+            new_storage.ssh_command(
+                ['zfs', 'create', '-V', self.get_property('size'), zfs_name])
+            dest_path = os.path.join(
+                '/dev/zvol', new_storage.path, new_name)
+            log.info('Writing data from temp {!r} to {!r} (on {})'.format(
+                temp_dest_path, dest_path, new_storage))
+
+            if old_format is None:
+                old_format = 'raw'
+            if old_format in ('qcow2', 'raw'):
+                new_storage.ssh_command(
+                    # -n = no create volume
+                    # -p = progress
+                    ['qemu-img', 'convert', '-n', '-p', '-f', old_format,
+                     '-O', 'raw', temp_dest_path, dest_path], tty=True)
+                log.info('Removing temp {!r} (on {})'.format(
+                    temp_dest_path, new_storage))
+                new_storage.ssh_command(['rm', temp_dest_path])
+            else:
+                raise NotImplementedError(
+                    'format conversion from {!r} not implemented'.format(
+                        old_format))
+
+            cloned_volume = ProxmoxVolume(
+                new_name, self.get_properties_without('format'),
+                storage=new_storage)
+        else:
+            raise NotImplementedError(new_storage.type)
+
+        return cloned_volume
+
+    def as_properties(self):
+        """
+        Return something like: "san06:123/vm-123-disk.qcow2,size=50G,..."
+        """
+        if self.storage:
+            location = '{}:{}'.format(self.storage.name, self.location)
+        else:
+            assert self.location == 'none', self.location
+            location = self.location
+
+        if self.properties:
+            return '{},{}'.format(location, self.properties)
+        return location
+
+    def __str__(self):
+        if self.storage:
+            return '{}:{},{}'.format(
+                self.storage.name, self.location, self.properties)
+        return '{},{}'.format(self.location, self.properties)
 
 
 class DefaultConfigTranslator(object):
@@ -355,15 +783,6 @@ class DefaultConfigTranslator(object):
             # concurrent updates.
             if key == 'digest':
                 pass
-            # v-- should remove CDROM
-            # 'ide2': 'san06:iso/debian-8.0.0-amd64-netinst.iso,media=cdrom',
-            elif (re.match('^(ide|virtio)\d+$', key) and
-                    ',media=cdrom' in value):
-                new_config[key] = re.sub('^[^,]*', 'none', value)
-            # V-- temporary
-            # 'virtio0': 'san06:...,...' => 'none,...'
-            elif re.match('^(ide|virtio)\d+$', key):
-                new_config[key] = re.sub('^[^,]*', 'none', value)
             else:
                 new_config[key] = value
         return new_config
@@ -374,11 +793,11 @@ def load_config():
         description=(
             'Migrate VMs from one Proxmox cluster to another.'),
         epilog=(
-            'Cluster aliases should be defined in ~/.proxmoverc '
-            '(or see -c option). '
-            'Define sections with the cluster name in brackets. The '
-            'proxmoxapi= setting specifies how to reach the Proxmox '
-            'API using common https://user:pass@host:port syntax.'))
+            'Cluster aliases and storage locations should be defined '
+            'in ~/.proxmoverc (or see -c option). See the example '
+            'proxmoverc.sample. It requires [pve:CLUSTER_ALIAS] sections for '
+            'the proxmox "api" URL and [storage:CLUSTER_ALIAS:STORAGE_NAME] '
+            'sections with "ssh", "path" and "temp" settings.'))
     parser.add_argument(
         '-c', '--config', action='store', metavar='FILENAME',
         default='~/.proxmoverc', help=(
@@ -389,12 +808,24 @@ def load_config():
     parser.add_argument(
         '--version', action='version', version=(
             'proxmove {}'.format(__version__)))
+    # TODO: Other commands:
+    # - ssh CLUSTER:SAN
+    # - nodes CLUSTER (show nodes (and storage?))
+    # - storages CLUSTER:NODE (show nodes)
+    # - move SRC DST DSTNODE VM..
+    # - dumpconfig (based with the storage devices..)
     parser.add_argument(
         'source', action='store', help=(
             'alias of source cluster'))
     parser.add_argument(
         'destination', action='store', help=(
             'alias of destination cluster'))
+    parser.add_argument(
+        'nodeid', action='store', help=(
+            'node on destination cluster'))
+    parser.add_argument(
+        'storage', action='store', help=(
+            'storage on destination node'))
     parser.add_argument(
         'vm', action='store', nargs='+', help=(
             'one or more VMs (guests) to move'))
@@ -440,20 +871,50 @@ def load_config():
                 'destination cluster {!r} is unavailable: {}: {}'.format(
                     args.destination.name, type(e).__name__, e.args[0]))
 
+    if args.nodeid not in args.destination.get_nodes():
+        parser.error(
+            'destination node {!r} not found in cluster'.format(args.nodeid))
+
+    try:
+        args.storage = args.destination.get_storage(args.nodeid, args.storage)
+    except ValueError:
+        parser.error(
+            'destination storage {!r} not found in node {!r}'.format(
+                args.storage, args.nodeid))
+
     return args
 
 
 def main():
+    # Set logging mode.
+    logconfig = {
+        'version': 1,
+        'formatters': {
+            'full': {
+                'format': '%(asctime)-15s: %(levelname)s: %(message)s'}},
+        'handlers': {
+            'console': {
+                'class': 'logging.StreamHandler', 'formatter': 'full'}},
+        'loggers': {
+            '': {'handlers': ['console'], 'level': 'WARNING'},
+            'proxmove': {'handlers': ['console'], 'level': 'INFO',
+                         'propagate': False}},
+    }
+    logging.config.dictConfig(logconfig)
+
+    # Load up config.
     options = load_config()
-    source, dest = options.source, options.destination
+    src_pve, dst_pve = options.source, options.destination
+    dst_node, dst_storage = options.nodeid, options.storage
 
     # Iterate over all VMs before we start.
+    log.debug('Sanity checking arguments...')
     try:
         vms = []
         for vm_name in options.vm:
             # Check that there doesn't exist one on the destination already.
             try:
-                dest.get_vm(vm_name)
+                dst_pve.get_vm(vm_name)
             except ProxmoxVm.DoesNotExist:
                 pass
             else:
@@ -462,7 +923,7 @@ def main():
                         vm_name))
 
             # Get the current one.
-            vm = source.get_vm(vm_name)
+            vm = src_pve.get_vm(vm_name)
             vms.append(vm)
     except ProxmoxVm.Error as e:
         print('error: {}'.format(e), file=sys.stderr)
@@ -473,52 +934,66 @@ def main():
     # {'bootdisk': 'virtio0',
     #  'cores': 8,
     #  'digest': 'XXXXXXXXXXXXXXXXcfa3e49c8568312e7d148505',
-    #  # v-- should remove CDROM
+    #  # v-- we "eject" the cdrom, replacing it with "none"
     #  'ide2': 'san06:iso/debian-8.0.0-amd64-netinst.iso,media=cdrom',
     #  'memory': 4096,
-    #  'name': 'jessie-builder.example.com',
+    #  'name': 'vm-to-move.example.com',
     #  # v-- vmbr138 will work fine as long as cluster is in same location
     #  'net0': 'virtio=XX:XX:XX:XX:8B:22,bridge=vmbr138',
     #  # v-- is constant (apparently?)
     #  'ostype': 'l26',
     #  'smbios1': 'uuid=XXXXXXXX-XXXX-XXXX-8712-e68a063d993e,'
-    #             'manufacturer=example,product=jessie-builder',
+    #             'manufacturer=example,product=vm-to-move',
     #  'sockets': 1,
-    #  # v-- should move disk, to something like
-    #        "virtio0: mc9-5-local-ssd:vm-114-disk-1,size=50G"
+    #  # v-- disk moving is covered in ProxmoxVolume
     #  'virtio0': 'san08:520/vm-520-disk-1.qcow2,format=qcow2,iops_rd=5000,'
     #             'iops_wr=400,size=50G'}
     #
-    # Translations on new:
-    # - '(ide|virtio)\d+': s/.*,media=cdrom/none,media=cdrom/
-    # Translations on old:
-    # - 'name': s/.*/&--MIGRATED/
-    #
     # Steps:
     # - translate old config to new config
-    # - create new config on nodeX on dest (random for now, later --node=node)
-    # - stop old host
-    # - translate old config on source (rename to --MIGRATED) (add comment?)
-    print('Moving from', source, 'to', dest)
+    # - create new config on nodeX on dest (no disks, MIGRATING name)
+    # - stop old host, rename to MIGRATING
+    # - move all disks, one by one
+    # - rename dest to real name, rename source to MIGRATED, add comment
     translator = DefaultConfigTranslator()
     for src_vm in vms:
-        print('-', src_vm.name)
-        print('  source', src_vm)
-        for key, value in src_vm.get_config().items():
-            if key.startswith('ide') or key.startswith('virtio'):
-                print('  listing disk {!r}: {}'.format(key, value))
+        log.info('Move {} => {} (node {!r}): {}'.format(
+            src_pve, dst_pve, dst_node, src_vm.name))
+
+        log.info('- source VM {}'.format(src_vm))
+        for key, volume in src_vm.get_volumes().items():
+            info = volume.get_info()
+            log.info('- storage {!r}: {} (blobsize={})'.format(
+                key, volume, info['size']))
+
         if not options.dry_run:
+            # Translate config, create new VM.
+            src_vm_name = src_vm.name
             dst_config = translator.config(src_vm.get_config())
-            dst_vm = dest.create_vm(src_vm.type, dst_config, nodeid=None)
-            print('  destination', dst_vm)
-            print('  stopping', src_vm)
-            src_vm.stop()
-            print('  stopped', src_vm)
+            dst_vm = dst_pve.create_vm(
+                src_vm.type, dst_config, nodeid=dst_node)
+            # dst_vm = dst_pve.get_vm(src_vm_name + '--MIGRATING')
+
+            # Stop old VM, create storage, copy storage.
+            src_vm.ensure_stopped()
+            src_vm.rename(src_vm_name + '--MIGRATING')
+            for key, volume in src_vm.get_volumes().items():
+                if key not in dst_vm.get_volumes():
+                    if volume.is_removable():
+                        dst_vm.create_volume(
+                            key, volume, storage=None)  # "eject"
+                    else:
+                        dst_vm.create_volume(
+                            key, volume, storage=dst_storage)
+
+            # Done? Rename both.
+            dst_vm.rename(src_vm_name)
+            src_vm.rename(src_vm_name + '--MIGRATED')
             src_vm.add_comment('{} UTC: Migrated to {}'.format(
                 datetime.utcnow(), dst_vm))
-            print('  commented', src_vm)
-            src_vm.rename(src_vm.name + '--MIGRATED')
-            print('  renamed', src_vm)
+
+            # Start VM.
+            dst_vm.ensure_started()
 
 
 if __name__ == '__main__':
