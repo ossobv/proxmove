@@ -50,15 +50,15 @@ When configured, you can do something like this:
     12:12:27: Move banana-cluster<e1400248> => the-new-cluster<6669ad2c> (node 'node2'): the-vm-to-move
     12:12:27: - source VM the-vm-to-move@node1<qemu/565/running>
     12:12:27: - storage 'ide2': None,media=cdrom (blobsize=None)
-    12:12:27: - storage 'virtio0': san:565/vm-565-disk-1.qcow2,format=qcow2,iops_rd=4000,iops_wr=500,size=50G (blobsize=53705113600)
+    12:12:27: - storage 'virtio0': sharedsan:565/vm-565-disk-1.qcow2,format=qcow2,iops_rd=4000,iops_wr=500,size=50G (blobsize=53705113600)
     12:12:27: Creating new VM 'the-vm-to-move' on 'the-new-cluster', node 'node2'
     12:12:27: - created new VM 'the-vm-to-move--MIGRATING' as UPID:node2:00005977:1F4D78F4:57C55C0B:qmcreate:126:user@pve:; waiting for it to show up
     12:12:34: - created new VM 'the-vm-to-move--MIGRATING': the-vm-to-move--MIGRATING@node2<qemu/126/stopped>
     12:12:34: Stopping VM the-vm-to-move@node1<qemu/565/running>
     12:12:42: - stopped VM the-vm-to-move@node1<qemu/565/stopped>
     12:12:42: Ejected (cdrom?) volume 'ide2' (none) added to the-vm-to-move--MIGRATING@node2<qemu/126/stopped>
-    12:12:42: Begin copy of 'virtio0' (san:565/vm-565-disk-1.qcow2,format=qcow2,iops_rd=4000,iops_wr=500,size=50G) to local-ssd
-    12:12:42: SCP copy from '/pool0/san/images/565/vm-565-disk-1.qcow2' (on san) to 'root@node2.the-new-cluster.com:/node2-ssd/temp/temp-proxmove/vm-126-virtio0'
+    12:12:42: Begin copy of 'virtio0' (sharedsan:565/vm-565-disk-1.qcow2,format=qcow2,iops_rd=4000,iops_wr=500,size=50G) to local-ssd
+    12:12:42: SCP copy from '/pool0/san/images/565/vm-565-disk-1.qcow2' (on sharedsan) to 'root@node2.the-new-cluster.com:/node2-ssd/temp/temp-proxmove/vm-126-virtio0'
     Warning: Permanently added 'node2.the-new-cluster.com' (ECDSA) to the list of known hosts.
     vm-565-disk-1.qcow2   100%   50GB   90.5MB/s   09:26
     Connection to san.banana-cluster.com closed.
