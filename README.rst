@@ -1,7 +1,7 @@
 proxmove :: Proxmox VM migrator
 ===============================
 
-*Migrate VMs between different Proxmox VM clusters.*
+*Migrate VMs between different Proxmox VE clusters.*
 
 Migrating a virtual machine (VM) on a PVE-cluster from one node to
 another is implemented in the Proxmox Virtual Environment (PVE). But
