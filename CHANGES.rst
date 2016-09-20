@@ -5,6 +5,8 @@ Changes
 
   - Format is not always specified. If it isn't, use the image filename suffix
     when available.
+  - Sometimes old values aren't available in the "pending" list. Don't croak.
+    Closes #2.
 
 * **v0.0.5** - 2016-08-30
 

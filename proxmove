@@ -491,13 +491,14 @@ class ProxmoxVm(object):
                 if keys == set(['key', 'value']):
                     assert next_config.get(dict_['key']) == dict_['value']
                 else:
-                    pending.append('{!r}({!r}=>{!r})'.format(
-                        dict_['key'], dict_['value'], dict_['pending']))
+                    pending.append('{!r} ({!r} => {!r})'.format(
+                        dict_['key'], dict_.get('value'), dict_.get('pending')))
             if pending:
                 # Contains 'pending' changes. Refuse to continue.
+                pending.sort()
                 raise ProxmoxVm.Error(
-                    'VM {!r} contains pending changes: {}'.format(
-                        self.name, ', '.join(pending)))
+                    'VM {!r} contains pending changes:\n  {}'.format(
+                        self.name, '\n  '.join(pending)))
 
             # Update values.
             self.name = next_config['name']
