@@ -617,6 +617,16 @@ class ProxmoxVolume(object):
         parts = self.properties.split(',')
         return self.location is None or 'media=cdrom' in parts
 
+    def get_format(self):
+        """
+        Return image file format. Use the format property, or the image
+        file extension as fallback.
+        """
+        ret = self.get_property('format')
+        if not ret:
+            ret = self.location.rsplit('.', 1)[-1]
+        return ret
+
     def get_property(self, what):
         search = '{}='.format(what)
         parts = self.properties.split(',')
@@ -672,7 +682,7 @@ class ProxmoxVolume(object):
         new_key could be "virtio0" or "ide2" or ...
         """
         new_name = 'vm-{}-{}'.format(new_vmid, new_key)
-        old_format = self.get_property('format')
+        old_format = self.get_format()
 
         # Copy data from old storage.
         if self.storage.type == 'plain':
