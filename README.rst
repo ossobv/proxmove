@@ -11,7 +11,7 @@ proxmove helps you move VMs between PVE-clusters with minimal hassle.
 
 .. code-block:: console
 
-    usage: proxmove [-h] [-c FILENAME] [-n] [--version]
+    usage: proxmove [-h] [-c FILENAME] [-n] [--bwlimit MBPS] [--version]
                     source destination nodeid storage vm [vm ...]
 
     Migrate VMs from one Proxmox cluster to another.
@@ -28,6 +28,7 @@ proxmove helps you move VMs between PVE-clusters with minimal hassle.
       -c FILENAME, --config FILENAME
                             use alternate configuration inifile
       -n, --dry-run         stop before doing any writes
+      --bwlimit MBPS        limit bandwidth in Mbit/s
       --version             show program's version number and exit
 
     Cluster aliases and storage locations should be defined in ~/.proxmoverc (or

@@ -3,8 +3,16 @@ Changes
 
 * **vHEAD** - XXXX-XX-XX
 
-  - Format is not always specified. If it isn't, use the image filename suffix
-    when available.
+  New features:
+
+  - Add --bwlimit in Mbit/s to limit bandwidth during transfer. Will use the
+    scp(1) -l option or for ZFS use the mbuffer(1) auxiliary. As an added bonus
+    mbuffer may improve ZFS send/recv speed through buffering. Closes #4.
+
+  Bugs fixed:
+
+  - Format is not always specified in the properties. If it isn't, use
+    the image filename suffix when available.
   - Sometimes old values aren't available in the "pending" list. Don't croak.
     Closes #2.
 

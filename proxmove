@@ -364,11 +364,15 @@ class ProxmoxStorage(object):
         return storage
 
     def __init__(self, name):
+        # Set from inifile.
         self.name = name
         self.ssh = None
         self.type = None
         self.path = None
         self.temp = None
+
+        # Set through command line.
+        self.bwlimit = None
 
     def run_command(self, command, hide_stderr=False, tty=False):
         kwargs = {}
@@ -392,6 +396,17 @@ class ProxmoxStorage(object):
         else:
             return subprocess.check_output(command, **kwargs)
 
+    def has_commands(self, commands):
+        try:
+            result = self.ssh_command(['which'] + commands, hide_stderr=True)
+        except subprocess.CalledProcessError:
+            return False
+        result = result.decode('ascii', 'replace').strip()
+        found = set([i.rsplit('/', 1)[-1] for i in result.split('\n')])
+        expected = set(commands)
+        assert not (found - expected), (expected, found)
+        return not (expected - found)  # should have them all
+
     def ssh_command(self, command, hide_stderr=False, tty=False):
         extra = []
         if tty:
@@ -401,6 +416,12 @@ class ProxmoxStorage(object):
             # but I'm not sure we want to.
             ['ssh', '-A',  # '-o', 'StrictHostKeyChecking=no',
              self.ssh] + extra + command, hide_stderr=hide_stderr, tty=tty)
+
+    def get_bandwidth_limit(self):
+        return self.bwlimit
+
+    def set_bandwidth_limit(self, bwlimit):
+        self.bwlimit = bwlimit
 
     def get_volume(self, location, properties):
         return ProxmoxVolume(location, properties, storage=self)
@@ -492,7 +513,8 @@ class ProxmoxVm(object):
                     assert next_config.get(dict_['key']) == dict_['value']
                 else:
                     pending.append('{!r} ({!r} => {!r})'.format(
-                        dict_['key'], dict_.get('value'), dict_.get('pending')))
+                        dict_['key'], dict_.get('value'),
+                        dict_.get('pending')))
             if pending:
                 # Contains 'pending' changes. Refuse to continue.
                 pending.sort()
@@ -684,6 +706,7 @@ class ProxmoxVolume(object):
         """
         new_name = 'vm-{}-{}'.format(new_vmid, new_key)
         old_format = self.get_format()
+        bw_limit_mbps = self.storage.get_bandwidth_limit()
 
         # Copy data from old storage.
         if self.storage.type == 'plain':
@@ -694,7 +717,8 @@ class ProxmoxVolume(object):
             log.info('SCP copy from {!r} (on {}) to {!r}'.format(
                 source_path, self.storage, scp_dest))
 
-            # test if "temp" exists, and die if it doesn't
+            # Test whether "temp" exists, and die if it doesn't.
+            # TODO: we should do this earlier..
             try:
                 new_storage.ssh_command(
                     ['test', '-d', new_storage.temp])
@@ -707,10 +731,15 @@ class ProxmoxVolume(object):
             new_storage.ssh_command(
                 ['mkdir', '-p', os.path.dirname(temp_dest_path)])
             # scp, using ssh+scp instead of local-scp, so we can add our
-            # beloved options
-            self.storage.ssh_command(
-                ['scp', '-o', 'StrictHostKeyChecking=no',
-                 source_path, scp_dest], tty=True)
+            # beloved options.
+            scp_command = ['scp', '-o', 'StrictHostKeyChecking=no']
+            # Add bandwidth limits in kbit/s.
+            if bw_limit_mbps:
+                scp_command.extend(['-l', str(bw_limit_mbps * 1024)])
+            # Source/destination.
+            scp_command.extend([source_path, scp_dest])
+            # Exec.
+            self.storage.ssh_command(scp_command, tty=True)
         elif self.storage.type == 'zfs':
             # *from* ZFS
             if new_storage.type == 'zfs':
@@ -767,15 +796,32 @@ class ProxmoxVolume(object):
                 src_zfs_name = '{}/{}@proxmove-{}'.format(
                     self.storage.path, self.location,
                     datetime.now().strftime('%y%m%d-%H%M%S'))
-                log.info('Copying data from {!r} to {!r} (on {})'.format(
-                    src_zfs_name, zfs_name, new_storage))
+                log.info('Copying {} data from {!r} to {!r} (on {})'.format(
+                    self.get_info()['size'], src_zfs_name, zfs_name,
+                    new_storage))
 
                 self.storage.ssh_command(
                     ['zfs', 'snapshot', src_zfs_name])
+
+                # mbuffer takes k-, M- or G-bytes
+                if bw_limit_mbps:
+                    mbuffer_write_limit = '-R {}k'.format(bw_limit_mbps * 128)
+                    mbuffer_read_limit = '-r {}k'.format(bw_limit_mbps * 128)
+                else:
+                    mbuffer_read_limit = mbuffer_write_limit = ''
+
                 self.storage.ssh_command(
-                    ['zfs', 'send', '-Rv', src_zfs_name, '|',
-                     'ssh', '-o', 'StrictHostKeyChecking=no',
-                     new_storage.ssh, 'zfs', 'recv', zfs_name], tty=True)
+                    ["zfs send -R {src_zfs} | "
+                     "mbuffer -q -s 128k -m 2G {src_bwlim} | "
+                     "ssh -o StrictHostKeyChecking=no {dst_ssh} "
+                     "'mbuffer -s 128k -m 2G {dst_bwlim} | "
+                     " zfs recv {dst_zfs}'".format(
+                         src_zfs=src_zfs_name,
+                         src_bwlim=mbuffer_write_limit,
+                         dst_ssh=new_storage.ssh,
+                         dst_bwlim=mbuffer_write_limit,
+                         dst_zfs=zfs_name)],
+                    tty=True)
             elif temp_dest_path:
                 # *from* plain (raw? qcow2?) *to* ZFS
                 new_storage.ssh_command(
@@ -866,6 +912,9 @@ def load_config():
     parser.add_argument(
         '-n', '--dry-run', action='store_true', help=(
             'stop before doing any writes'))
+    parser.add_argument(
+        '--bwlimit', action='store', metavar='MBPS', type=int, help=(
+            'limit bandwidth in Mbit/s'))
     parser.add_argument(
         '--version', action='version', version=(
             'proxmove {}'.format(__version__)))
@@ -968,6 +1017,9 @@ def main():
     src_pve, dst_pve = options.source, options.destination
     dst_node, dst_storage = options.nodeid, options.storage
 
+    # Set bandwidth limit.
+    dst_storage.set_bandwidth_limit(options.bwlimit)
+
     # Iterate over all VMs before we start.
     log.debug('Sanity checking arguments...')
     try:
@@ -990,6 +1042,34 @@ def main():
         print('error: {}'.format(e), file=sys.stderr)
         print('aborting', file=sys.stderr)
         sys.exit(1)
+
+    # Check relevant storages.
+    # Set bandwidth limit.
+    # TODO: check temp paths
+    # TODO: refactor this!
+    storages = set([dst_storage])
+    for vm in vms:
+        for volume in vm.get_volumes().values():
+            if volume.storage:
+                storages.add(volume.storage)
+    for storage in storages:
+        if storage.type == 'plain':
+            if not storage.has_commands(['ssh', 'scp']):
+                print(
+                    'error: Storage {} lacks ssh(1) or scp(1)'
+                    .format(storage), file=sys.stderr)
+                print('aborting', file=sys.stderr)
+                sys.exit(1)
+        elif storage.type == 'zfs':
+            if not storage.has_commands(['ssh', 'zfs', 'mbuffer']):
+                print(
+                    'error: Storage {} lacks ssh(1), zfs(1) or mbuffer(1)'
+                    .format(storage), file=sys.stderr)
+                print('aborting', file=sys.stderr)
+                sys.exit(1)
+
+        # Set bandwidth limit on the storage object.
+        storage.set_bandwidth_limit(options.bwlimit)
 
     # Config and notes:
     # {'bootdisk': 'virtio0',
