@@ -1,0 +1,12 @@
+# https://bettercodehub.com
+
+# Search for project directories in the root dir (level 1).
+component_depth: 1
+
+languages:
+  - name: python
+
+    production:
+      include:
+        # The CLI app lacks extension.
+        - /proxmove
