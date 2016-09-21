@@ -50,6 +50,18 @@ SUFFIX_MIGRATED = '--MIGRATED'  # source, when done
 PROXMOX_VOLUME_TYPES = ('ide', 'sata', 'scsi', 'virtio')
 
 
+class ProxmoveError(Exception):
+    pass
+
+
+class PrepareError(ProxmoveError):
+    """
+    Failure during preparation and requirements checking. This is only
+    raised if we haven't mutated any data yet.
+    """
+    pass
+
+
 class ArgumentParser14191(argparse.ArgumentParser):
     """ArgumentParser from argparse that handles out-of-order positional
     arguments.
@@ -471,10 +483,7 @@ class ProxmoxStorage(object):
 
 
 class ProxmoxVm(object):
-    class Error(ValueError):
-        pass
-
-    class DoesNotExist(Error):
+    class DoesNotExist(ProxmoveError):
         pass
 
     @classmethod
@@ -496,13 +505,12 @@ class ProxmoxVm(object):
         self.cluster = cluster
         self._cache = {}
 
-    def get_config(self):
+    def check_config(self):
         """
-        Get current configuration and check that the are no pending
-        changes.
+        Check whether we can move this VM.
         """
-        if 'config' not in self._cache:
-            next_config = self.api_vm.config.get()
+        if 'pending' not in self._cache:
+            config = self.get_config()
 
             # Check pending.
             pending_config = self.api_vm.pending.get()  # may not exist for lxc
@@ -510,21 +518,29 @@ class ProxmoxVm(object):
             for dict_ in pending_config:
                 keys = dict_.keys()
                 if keys == set(['key', 'value']):
-                    assert next_config.get(dict_['key']) == dict_['value']
+                    assert config.get(dict_['key']) == dict_['value']
                 else:
-                    pending.append('{!r} ({!r} => {!r})'.format(
+                    pending.append('{!r}: {!r} => {!r}'.format(
                         dict_['key'], dict_.get('value'),
                         dict_.get('pending')))
+
             if pending:
                 # Contains 'pending' changes. Refuse to continue.
                 pending.sort()
-                raise ProxmoxVm.Error(
+                raise PrepareError(
                     'VM {!r} contains pending changes:\n  {}'.format(
                         self.name, '\n  '.join(pending)))
 
-            # Update values.
-            self.name = next_config['name']
+            self._cache['pending'] = None  # nothing to return
+        return self._cache['pending']
 
+    def get_config(self):
+        """
+        Get current configuration and store name.
+        """
+        if 'config' not in self._cache:
+            next_config = self.api_vm.config.get()
+            self.name = next_config['name']
             self._cache['config'] = next_config
         return self._cache['config']
 
@@ -819,7 +835,7 @@ class ProxmoxVolume(object):
                          src_zfs=src_zfs_name,
                          src_bwlim=mbuffer_write_limit,
                          dst_ssh=new_storage.ssh,
-                         dst_bwlim=mbuffer_write_limit,
+                         dst_bwlim=mbuffer_read_limit,
                          dst_zfs=zfs_name)],
                     tty=True)
             elif temp_dest_path:
@@ -895,6 +911,162 @@ class DefaultConfigTranslator(object):
         return new_config
 
 
+class VmMover(object):
+    def __init__(self, options):
+        self.src_pve = options.source
+        self.dst_pve = options.destination
+        self.dst_node = options.nodeid
+        self.dst_storage = options.storage
+        self.bw_limit = options.bwlimit
+        self.vms_requested = options.vm
+
+        self.ignore_exists = options.ignore_exists
+
+        self.vms_to_move = None
+        self.storages = None
+
+    def prepare(self):
+        log.debug('Sanity checks and preparation')
+        self.prepare_vm_list()
+        self.prepare_vm_checks()
+        self.prepare_storage_list()
+        self.prepare_storage_prerequisites()
+        self.prepare_storage_settings()
+
+    def prepare_vm_list(self):
+        log.debug('Checking that the VMs exist on only the source')
+        vms = []
+        for vm_name in self.vms_requested:
+            try:
+                # TODO: Check whether the --CREATED version exists?
+                self.dst_pve.get_vm(vm_name)
+            except ProxmoxVm.DoesNotExist:
+                pass
+            else:
+                if not self.ignore_exists:
+                    raise PrepareError(
+                        'VM {!r} exists on destination already'.format(
+                            vm_name))
+
+            # Get the current one, check validity and add to list.
+            vm = self.src_pve.get_vm(vm_name)
+            vms.append(vm)
+
+        self.vms_to_move = vms
+        self.vms_requested = None
+
+    def prepare_vm_checks(self):
+        log.debug(
+            'Checking for pending changes in %d VMs to move',
+            len(self.vms_to_move))
+
+        for vm in self.vms_to_move:
+            vm.check_config()
+
+    def prepare_storage_list(self):
+        storages = set([self.dst_storage])
+        for vm in self.vms_to_move:
+            for volume in vm.get_volumes().values():
+                if volume.storage:
+                    storages.add(volume.storage)
+
+        log.debug(
+            'Found %d relevant storages: %s', len(storages),
+            ', '.join(str(i) for i in storages))
+        self.storages = storages
+
+    def prepare_storage_prerequisites(self):
+        log.debug('Checking storage prerequisites')
+
+        # TODO: refactor this into ProxmoxStorage..
+        for storage in self.storages:
+            if storage.type == 'plain':
+                if not storage.has_commands(['ssh', 'scp']):
+                    raise PrepareError(
+                        'Storage {} lacks ssh(1) or scp(1)'.format(
+                            storage), file=sys.stderr)
+            elif storage.type == 'zfs':
+                if not storage.has_commands(['ssh', 'zfs', 'mbuffer']):
+                    raise PrepareError(
+                        'Storage {} lacks ssh(1), zfs(1) or mbuffer(1)'.format(
+                            storage), file=sys.stderr)
+
+        # TODO: check temp paths (ticket #1?)
+
+    def prepare_storage_settings(self):
+        log.debug('Set bandwidth limit on storage objects')
+        for storage in self.storages:
+            storage.set_bandwidth_limit(self.bw_limit)
+
+    def run(self, dry_run):
+        translator = DefaultConfigTranslator()
+        for vm in self.vms_to_move:
+            self.move_vm(vm, translator, dry_run)
+
+    def move_vm(self, src_vm, translator, dry_run):
+        # Config and notes:
+        # {'bootdisk': 'virtio0',
+        #  'cores': 8,
+        #  'digest': 'XXXXXXXXXXXXXXXXcfa3e49c8568312e7d148505',
+        #  # v-- we "eject" the cdrom, replacing it with "none"
+        #  'ide2': 'san06:iso/debian-8.0.0-amd64-netinst.iso,media=cdrom',
+        #  'memory': 4096,
+        #  'name': 'vm-to-move.example.com',
+        #  # v-- vmbr138 will work fine as long as cluster is in same location
+        #  'net0': 'virtio=XX:XX:XX:XX:8B:22,bridge=vmbr138',
+        #  # v-- is constant (apparently?)
+        #  'ostype': 'l26',
+        #  'smbios1': 'uuid=XXXXXXXX-XXXX-XXXX-8712-e68a063d993e,'
+        #             'manufacturer=example,product=vm-to-move',
+        #  'sockets': 1,
+        #  # v-- disk moving is covered in ProxmoxVolume
+        #  'virtio0': 'san8:520/vm-520-disk-1.qcow2,format=qcow2,iops_rd=5000,'
+        #             'iops_wr=400,size=50G'}
+        #
+        # Steps:
+        # - translate old config to new config
+        # - create new config on nodeX on dest (no disks, "CREATING" name)
+        # - stop old host, rename to "CLONING"
+        # - move all disks, one by one
+        # - rename dest to real name, rename source to "MIGRATED", add comment
+        log.info('Move {} => {} (node {!r}): {}'.format(
+            self.src_pve, self.dst_pve, self.dst_node, src_vm.name))
+
+        log.info('- source VM {}'.format(src_vm))
+        for key, volume in src_vm.get_volumes().items():
+            info = volume.get_info()
+            log.info('- storage {!r}: {} (blobsize={})'.format(
+                key, volume, info['size']))
+
+        if not dry_run:
+            # Translate config, create new VM.
+            src_vm_name = src_vm.name
+            dst_config = translator.config(src_vm.get_config())
+            dst_vm = self.dst_pve.create_vm(
+                src_vm.type, dst_config, nodeid=self.dst_node)
+
+            # Stop old VM, create storage, copy storage.
+            src_vm.ensure_stopped()
+            src_vm.rename(src_vm_name + SUFFIX_CLONING)
+            for key, volume in src_vm.get_volumes().items():
+                if key not in dst_vm.get_volumes():
+                    if volume.is_removable():
+                        dst_vm.create_volume(
+                            key, volume, storage=None)  # "eject"
+                    else:
+                        dst_vm.create_volume(
+                            key, volume, storage=self.dst_storage)
+
+            # Done? Rename both.
+            dst_vm.rename(dst_config['name'])
+            src_vm.rename(src_vm_name + SUFFIX_MIGRATED)
+            src_vm.add_comment('{} UTC: Migrated to {}'.format(
+                datetime.utcnow(), dst_vm))
+
+            # Start VM.
+            dst_vm.ensure_started()
+
+
 def load_config():
     parser = ArgumentParser14191(
         description=(
@@ -918,6 +1090,16 @@ def load_config():
     parser.add_argument(
         '--version', action='version', version=(
             'proxmove {}'.format(__version__)))
+
+    # Debugging options. Not needed in full view at the moment.
+    parser.add_argument(
+        # Enables debug log.
+        '--debug', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument(
+        # Ignores the fact that a VM exists already. Can be used to test
+        # moves between the same platform.
+        '--ignore-exists', action='store_true', help=argparse.SUPPRESS)
+
     # TODO: Other commands:
     # - ssh CLUSTER:SAN
     # - nodes CLUSTER (show nodes (and storage?))
@@ -1014,127 +1196,19 @@ def main():
 
     # Load up config.
     options = load_config()
-    src_pve, dst_pve = options.source, options.destination
-    dst_node, dst_storage = options.nodeid, options.storage
+    if options.debug:
+        log.setLevel('DEBUG')
 
-    # Set bandwidth limit.
-    dst_storage.set_bandwidth_limit(options.bwlimit)
-
-    # Iterate over all VMs before we start.
-    log.debug('Sanity checking arguments...')
+    # Create mover and start the move.
+    vmmover = VmMover(options)
     try:
-        vms = []
-        for vm_name in options.vm:
-            # Check that there doesn't exist one on the destination already.
-            try:
-                dst_pve.get_vm(vm_name)
-            except ProxmoxVm.DoesNotExist:
-                pass
-            else:
-                raise ProxmoxVm.Error(
-                    'VM {!r} exists on destination already'.format(
-                        vm_name))
-
-            # Get the current one.
-            vm = src_pve.get_vm(vm_name)
-            vms.append(vm)
-    except ProxmoxVm.Error as e:
+        vmmover.prepare()
+    except PrepareError as e:
         print('error: {}'.format(e), file=sys.stderr)
         print('aborting', file=sys.stderr)
         sys.exit(1)
-
-    # Check relevant storages.
-    # Set bandwidth limit.
-    # TODO: check temp paths
-    # TODO: refactor this!
-    storages = set([dst_storage])
-    for vm in vms:
-        for volume in vm.get_volumes().values():
-            if volume.storage:
-                storages.add(volume.storage)
-    for storage in storages:
-        if storage.type == 'plain':
-            if not storage.has_commands(['ssh', 'scp']):
-                print(
-                    'error: Storage {} lacks ssh(1) or scp(1)'
-                    .format(storage), file=sys.stderr)
-                print('aborting', file=sys.stderr)
-                sys.exit(1)
-        elif storage.type == 'zfs':
-            if not storage.has_commands(['ssh', 'zfs', 'mbuffer']):
-                print(
-                    'error: Storage {} lacks ssh(1), zfs(1) or mbuffer(1)'
-                    .format(storage), file=sys.stderr)
-                print('aborting', file=sys.stderr)
-                sys.exit(1)
-
-        # Set bandwidth limit on the storage object.
-        storage.set_bandwidth_limit(options.bwlimit)
-
-    # Config and notes:
-    # {'bootdisk': 'virtio0',
-    #  'cores': 8,
-    #  'digest': 'XXXXXXXXXXXXXXXXcfa3e49c8568312e7d148505',
-    #  # v-- we "eject" the cdrom, replacing it with "none"
-    #  'ide2': 'san06:iso/debian-8.0.0-amd64-netinst.iso,media=cdrom',
-    #  'memory': 4096,
-    #  'name': 'vm-to-move.example.com',
-    #  # v-- vmbr138 will work fine as long as cluster is in same location
-    #  'net0': 'virtio=XX:XX:XX:XX:8B:22,bridge=vmbr138',
-    #  # v-- is constant (apparently?)
-    #  'ostype': 'l26',
-    #  'smbios1': 'uuid=XXXXXXXX-XXXX-XXXX-8712-e68a063d993e,'
-    #             'manufacturer=example,product=vm-to-move',
-    #  'sockets': 1,
-    #  # v-- disk moving is covered in ProxmoxVolume
-    #  'virtio0': 'san08:520/vm-520-disk-1.qcow2,format=qcow2,iops_rd=5000,'
-    #             'iops_wr=400,size=50G'}
-    #
-    # Steps:
-    # - translate old config to new config
-    # - create new config on nodeX on dest (no disks, "CREATING" name)
-    # - stop old host, rename to "CLONING"
-    # - move all disks, one by one
-    # - rename dest to real name, rename source to "MIGRATED", add comment
-    translator = DefaultConfigTranslator()
-    for src_vm in vms:
-        log.info('Move {} => {} (node {!r}): {}'.format(
-            src_pve, dst_pve, dst_node, src_vm.name))
-
-        log.info('- source VM {}'.format(src_vm))
-        for key, volume in src_vm.get_volumes().items():
-            info = volume.get_info()
-            log.info('- storage {!r}: {} (blobsize={})'.format(
-                key, volume, info['size']))
-
-        if not options.dry_run:
-            # Translate config, create new VM.
-            src_vm_name = src_vm.name
-            dst_config = translator.config(src_vm.get_config())
-            dst_vm = dst_pve.create_vm(
-                src_vm.type, dst_config, nodeid=dst_node)
-            # dst_vm = dst_pve.get_vm(dst_config['name'] + SUFFIX_CREATING)
-
-            # Stop old VM, create storage, copy storage.
-            src_vm.ensure_stopped()
-            src_vm.rename(src_vm_name + SUFFIX_CLONING)
-            for key, volume in src_vm.get_volumes().items():
-                if key not in dst_vm.get_volumes():
-                    if volume.is_removable():
-                        dst_vm.create_volume(
-                            key, volume, storage=None)  # "eject"
-                    else:
-                        dst_vm.create_volume(
-                            key, volume, storage=dst_storage)
-
-            # Done? Rename both.
-            dst_vm.rename(dst_config['name'])
-            src_vm.rename(src_vm_name + SUFFIX_MIGRATED)
-            src_vm.add_comment('{} UTC: Migrated to {}'.format(
-                datetime.utcnow(), dst_vm))
-
-            # Start VM.
-            dst_vm.ensure_started()
+    else:
+        vmmover.run(options.dry_run)
 
 
 if __name__ == '__main__':

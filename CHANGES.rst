@@ -5,9 +5,13 @@ Changes
 
   New features:
 
-  - Add --bwlimit in Mbit/s to limit bandwidth during transfer. Will use the
-    scp(1) -l option or for ZFS use the mbuffer(1) auxiliary. As an added bonus
-    mbuffer may improve ZFS send/recv speed through buffering. Closes #4.
+  - Add --bwlimit in Mbit/s to limit bandwidth during transfer. Will use
+    the scp(1) -l option or for ZFS use the mbuffer(1) auxiliary. As an
+    added bonus mbuffer may improve ZFS send/recv speed through
+    buffering. Closes #4.
+  - Add hidden --debug option for more verbosity.
+  - Add hidden --ignore-exists option that allows you to test moves
+    between the same cluster by creating an alias (second config).
 
   Bugs fixed:
 
@@ -15,6 +19,7 @@ Changes
     the image filename suffix when available.
   - Sometimes old values aren't available in the "pending" list. Don't croak.
     Closes #2.
+  - Begun refactoring. Testing bettercodehub.com.
 
 * **v0.0.5** - 2016-08-30
 
