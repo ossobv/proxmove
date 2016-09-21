@@ -1182,6 +1182,8 @@ class VmMover(object):
 
         log.info('- source VM {}'.format(src_vm))
         for key, volume in src_vm.get_volumes().items():
+            # TODO: Check whether volume is accessible? Must be combined
+            # with the is_removable() and skip_disks options below.
             log.info('- storage {!r}: {} (blobsize={})'.format(
                 key, volume, volume.get_human_size()))
 
