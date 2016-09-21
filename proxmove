@@ -1067,114 +1067,135 @@ class VmMover(object):
             dst_vm.ensure_started()
 
 
-def load_config():
-    parser = ArgumentParser14191(
-        description=(
-            'Migrate VMs from one Proxmox cluster to another.'),
-        epilog=(
-            'Cluster aliases and storage locations should be defined '
-            'in ~/.proxmoverc (or see -c option). See the example '
-            'proxmoverc.sample. It requires [pve:CLUSTER_ALIAS] sections for '
-            'the proxmox "api" URL and [storage:CLUSTER_ALIAS:STORAGE_NAME] '
-            'sections with "ssh", "path" and "temp" settings.'))
-    parser.add_argument(
-        '-c', '--config', action='store', metavar='FILENAME',
-        default='~/.proxmoverc', help=(
-            'use alternate configuration inifile'))
-    parser.add_argument(
-        '-n', '--dry-run', action='store_true', help=(
-            'stop before doing any writes'))
-    parser.add_argument(
-        '--bwlimit', action='store', metavar='MBPS', type=int, help=(
-            'limit bandwidth in Mbit/s'))
-    parser.add_argument(
-        '--version', action='version', version=(
-            'proxmove {}'.format(__version__)))
+class CommandLoader(object):
+    def __init__(self):
+        self.argparse()
+        self.load_config()
+        self.process()
 
-    # Debugging options. Not needed in full view at the moment.
-    parser.add_argument(
-        # Enables debug log.
-        '--debug', action='store_true', help=argparse.SUPPRESS)
-    parser.add_argument(
-        # Ignores the fact that a VM exists already. Can be used to test
-        # moves between the same platform.
-        '--ignore-exists', action='store_true', help=argparse.SUPPRESS)
+    def argparse(self):
+        self.argparse_create()
+        self.argparse_add_options()
+        self.argparse_add_arguments()
+        self.argparse_run()
 
-    # TODO: Other commands:
-    # - ssh CLUSTER:SAN
-    # - nodes CLUSTER (show nodes (and storage?))
-    # - storages CLUSTER:NODE (show nodes)
-    # - move SRC DST DSTNODE VM..
-    # - dumpconfig (based with the storage devices..)
-    parser.add_argument(
-        'source', action='store', help=(
-            'alias of source cluster'))
-    parser.add_argument(
-        'destination', action='store', help=(
-            'alias of destination cluster'))
-    parser.add_argument(
-        'nodeid', action='store', help=(
-            'node on destination cluster'))
-    parser.add_argument(
-        'storage', action='store', help=(
-            'storage on destination node'))
-    parser.add_argument(
-        'vm', action='store', nargs='+', help=(
-            'one or more VMs (guests) to move'))
+    def argparse_create(self):
+        # CURRENT:
+        # - move SRCCLUSTER DSTCLUSTER DSTNODE DSTSTORAGE VM..
+        # FUTURE:
+        # - ssh CLUSTER:STORAGE
+        # - nodes CLUSTER (show nodes (and storage?))
+        # - storages CLUSTER:NODE (show nodes)
+        # - move SRC DST DSTNODE VM..
+        # - dumpconfig (based with the storage devices..)
+        self.parser = ArgumentParser14191(
+            description=(
+                'Migrate VMs from one Proxmox cluster to another.'),
+            epilog=(
+                'Cluster aliases and storage locations should be defined '
+                'in ~/.proxmoverc (or see -c option). See the example '
+                'proxmoverc.sample. It requires [pve:CLUSTER_ALIAS] sections '
+                'for the proxmox "api" URL and '
+                '[storage:CLUSTER_ALIAS:STORAGE_NAME] sections with "ssh", '
+                '"path" and "temp" settings.'))
 
-    args = parser.parse_args()
+    def argparse_add_options(self):
+        self.parser.add_argument(
+            '-c', '--config', action='store', metavar='FILENAME',
+            default='~/.proxmoverc', help=(
+                'use alternate configuration inifile'))
+        self.parser.add_argument(
+            '-n', '--dry-run', action='store_true', help=(
+                'stop before doing any writes'))
+        self.parser.add_argument(
+            '--bwlimit', action='store', metavar='MBPS', type=int, help=(
+                'limit bandwidth in Mbit/s'))
+        self.parser.add_argument(
+            '--version', action='version', version=(
+                'proxmove {}'.format(__version__)))
 
-    try:
-        clusters = ProxmoxClusters.from_filename(
-            os.path.expanduser(args.config))
-    except ValueError as e:
-        parser.error(e.args[0])
+        # Debugging options. Not needed in full view at the moment.
+        self.parser.add_argument(
+            # Enables debug log.
+            '--debug', action='store_true', help=argparse.SUPPRESS)
+        self.parser.add_argument(
+            # Ignores the fact that a VM exists already. Can be used to test
+            # moves between the same platform.
+            '--ignore-exists', action='store_true', help=argparse.SUPPRESS)
 
-    if args.source == args.destination:
-        parser.error('source and destination arguments are the same')
+    def argparse_add_arguments(self):
+        self.parser.add_argument(
+            'source', action='store', help=(
+                'alias of source cluster'))
+        self.parser.add_argument(
+            'destination', action='store', help=(
+                'alias of destination cluster'))
+        self.parser.add_argument(
+            'nodeid', action='store', help=(
+                'node on destination cluster'))
+        self.parser.add_argument(
+            'storage', action='store', help=(
+                'storage on destination node'))
+        self.parser.add_argument(
+            'vm', action='store', nargs='+', help=(
+                'one or more VMs (guests) to move'))
 
-    try:
-        args.source = clusters[args.source]
-    except KeyError:
-        parser.error(
-            'source cluster name is not configured '
-            '(use one of: {})'.format(
-                ', '.join(sorted(clusters.keys()))))
-    else:
+    def argparse_run(self):
+        self.args = self.parser.parse_args()
+
+    def load_config(self):
         try:
-            args.source.ping()
-        except Exception as e:
-            parser.error(
-                'source cluster {!r} is unavailable: {}: {}'.format(
-                    args.source.name, type(e).__name__, e.args[0]))
+            self.clusters = ProxmoxClusters.from_filename(
+                os.path.expanduser(self.args.config))
+        except ValueError as e:
+            self.parser.error(e.args[0])
 
-    try:
-        args.destination = clusters[args.destination]
-    except KeyError:
-        parser.error(
-            'destination cluster name is not configured '
-            '(use one of: {})'.format(
-                ', '.join(sorted(clusters.keys()))))
-    else:
+    def process(self):
+        self.process_clusters()
+        self.process_nodes()
+
+    def process_clusters(self):
+        if (not self.args.ignore_exists and
+                self.args.source == self.args.destination):
+            self.parser.error('source and destination arguments are the same')
+
+        self.args.source = self.process_cluster(self.args.source)
+        self.args.destination = self.process_cluster(self.args.destination)
+
+    def process_cluster(self, cluster_name):
         try:
-            args.destination.ping()
+            cluster = self.clusters[cluster_name]
+        except KeyError:
+            found_clusters = ', '.join(sorted(self.clusters.keys()))
+            self.parser.error(
+                'cluster {!r} is not configured in config '
+                '(expected one of: {})'.format(cluster_name, found_clusters))
+
+        try:
+            cluster.ping()
         except Exception as e:
-            parser.error(
-                'destination cluster {!r} is unavailable: {}: {}'.format(
-                    args.destination.name, type(e).__name__, e.args[0]))
+            self.parser.error(
+                'cluster {!r} is unavailable: {}: {}'.format(
+                    cluster.name, type(e).__name__, e.args[0]))
 
-    if args.nodeid not in args.destination.get_nodes():
-        parser.error(
-            'destination node {!r} not found in cluster'.format(args.nodeid))
+        return cluster
 
-    try:
-        args.storage = args.destination.get_storage(args.nodeid, args.storage)
-    except ValueError:
-        parser.error(
-            'destination storage {!r} not found in node {!r}'.format(
-                args.storage, args.nodeid))
+    def process_nodes(self):
+        if self.args.nodeid not in self.args.destination.get_nodes():
+            self.parser.error(
+                'destination node {!r} not found in cluster'.format(
+                    self.args.nodeid))
 
-    return args
+        try:
+            self.args.storage = self.args.destination.get_storage(
+                self.args.nodeid, self.args.storage)
+        except ValueError:
+            self.parser.error(
+                'destination storage {!r} not found in node {!r}'.format(
+                    self.args.storage, self.args.nodeid))
+
+    def get_options(self):
+        return self.args
 
 
 def main():
@@ -1195,7 +1216,7 @@ def main():
     logging.config.dictConfig(logconfig)
 
     # Load up config.
-    options = load_config()
+    options = CommandLoader().get_options()
     if options.debug:
         log.setLevel('DEBUG')
 
