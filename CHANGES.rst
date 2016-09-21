@@ -9,6 +9,8 @@ Changes
     the scp(1) -l option or for ZFS use the mbuffer(1) auxiliary. As an
     added bonus mbuffer may improve ZFS send/recv speed through
     buffering. Closes #4.
+  - Adds optional pv(1) pipe viewer progress bar to get ETA in ZFS
+    transfers.
   - Add hidden --debug option for more verbosity.
   - Add hidden --ignore-exists option that allows you to test moves
     between the same cluster by creating an alias (second config).

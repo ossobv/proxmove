@@ -600,7 +600,9 @@ class ProxmoxStorageZfs(ProxmoxStorage):
             return None
 
         human_size = parts[-1].decode('ascii', 'replace')
-        return human_size_scan(human_size)
+        # Add a bit of size since it's a guesstimate. You'd rather not
+        # see the transfer go over 100%.
+        return int(human_size_scan(human_size) * 1.02)
 
     def set_path(self, value):
         assert value.startswith('zfs:'), value
@@ -934,20 +936,37 @@ class ProxmoxVolume(object):
                 # mbuffer takes k-, M- or G-bytes
                 if bw_limit_mbps:
                     mbuffer_write_limit = '-R {}k'.format(bw_limit_mbps * 128)
-                    mbuffer_read_limit = '-r {}k'.format(bw_limit_mbps * 128)
                 else:
-                    mbuffer_read_limit = mbuffer_write_limit = ''
+                    mbuffer_write_limit = ''
 
+                if new_storage.has_commands(['pv']) and self.get_size():
+                    log.debug(
+                        "Using pv(1) for progress bar because it's available.")
+                    optional_pv_pipe = (
+                        # --fineta does not exist on all versions..
+                        # --force is required to make it display anything..
+                        'pv --force --eta --progress -s {} | '.format(
+                            self.get_size()))
+                else:
+                    optional_pv_pipe = ''
+
+                # Older mbuffer(1) [v20140310-3] on the receiving end
+                # may say: "mbuffer: warning: No controlling terminal
+                # and no autoloader command specified." This is fixed
+                # in newer versions [v20150412-3].
                 self.storage.ssh_command(
                     ["zfs send -R {src_zfs} | "
-                     "mbuffer -q -s 128k -m 2G {src_bwlim} | "
+                     "mbuffer -q -s 128k -m 1G {src_bwlim} | "
                      "ssh -o StrictHostKeyChecking=no {dst_ssh} "
-                     "'mbuffer -s 128k -m 2G {dst_bwlim} | "
+                     "'mbuffer {optional_quiet_mbuffer} -s 128k -m 1G | "
+                     " {dst_pv}"
                      " zfs recv {dst_zfs}'".format(
                          src_zfs=src_zfs_name,
                          src_bwlim=mbuffer_write_limit,
                          dst_ssh=new_storage.ssh,
-                         dst_bwlim=mbuffer_read_limit,
+                         optional_quiet_mbuffer=(
+                             '-q' if optional_pv_pipe else ''),
+                         dst_pv=optional_pv_pipe,
                          dst_zfs=zfs_name)],
                     tty=True)
             elif temp_dest_path:
@@ -979,6 +998,10 @@ class ProxmoxVolume(object):
                 raise NotImplementedError(
                     'volume conversion from {} not implemented'.format(
                         self.storage.__class__))
+
+            # Log message so we know that the percentage shown by PV may
+            # not be accurate.
+            log.info('All data transferred sucessfully')
 
             cloned_volume = ProxmoxVolume(
                 new_name, self.get_properties_without('format'),
