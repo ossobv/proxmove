@@ -1264,7 +1264,12 @@ class CommandLoader(object):
     def argparse_run(self):
         self.args = self.parser.parse_args()
 
+        # Set debug mode as soon as possible.
+        if self.args.debug:
+            log.setLevel('DEBUG')
+
     def load_config(self):
+        log.debug('Parsing config file: {}'.format(self.args.config))
         try:
             self.clusters = ProxmoxClusters.from_filename(
                 os.path.expanduser(self.args.config))
@@ -1338,8 +1343,6 @@ def main():
 
     # Load up config.
     options = CommandLoader().get_options()
-    if options.debug:
-        log.setLevel('DEBUG')
 
     # Create mover and start the move.
     vmmover = VmMover(options)
