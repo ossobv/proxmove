@@ -17,6 +17,7 @@ import logging.config
 import os
 import random
 import re
+import string
 import subprocess
 import sys
 import time
@@ -48,6 +49,48 @@ SUFFIX_CLONING = '--CLONING'    # source, when cloning
 SUFFIX_CREATING = '--CREATING'  # dest, while cloning
 SUFFIX_MIGRATED = '--MIGRATED'  # source, when done
 PROXMOX_VOLUME_TYPES = ('ide', 'sata', 'scsi', 'virtio')
+
+
+def human_size_fmt(num, suffix='B'):
+    for unit in ('', 'Ki', 'Mi', 'Gi', 'Ti'):
+        if abs(num) < 1024.0:
+            return "%3.1f%s%s" % (num, unit, suffix)
+        num /= 1024.0
+    return "%.1f%s%s" % (num, 'Ti', suffix)
+
+
+def human_size_scan(num_str):
+    multipliers = {
+        'T': 1024 * 1024 * 1024 * 1024,
+        'G': 1024 * 1024 * 1024,
+        'M': 1024 * 1024,
+        'K': 1024,
+        'B': 1,
+    }
+
+    num_str = num_str.lstrip()
+    num_parts = []
+    suffix = ''
+    for i, ch in enumerate(num_str):
+        if ch in '0123456789.':
+            num_parts.append(ch)
+        elif ch == ',':
+            pass
+        else:
+            suffix = num_str[i:].strip()
+            break
+
+    if '.' in num_parts:
+        num_parts = float(''.join(num_parts))
+    else:
+        num_parts = int(''.join(num_parts))
+
+    multiplier = multipliers.get(suffix[0:1].upper())
+    if multiplier:
+        return int(num_parts * multiplier)
+    if not suffix:
+        return int(suffix)
+    raise ValueError('unknown suffix found in {!r}'.format(num_str))
 
 
 class ProxmoveError(Exception):
@@ -358,33 +401,47 @@ class ProxmoxCluster(object):
 class ProxmoxStorage(object):
     @classmethod
     def from_section(cls, name, section):
-        storage = cls(name)
+        storages = []
+        for model in (ProxmoxStoragePlain, ProxmoxStorageZfs):
+            try:
+                storage = model.from_section(name, section)
+            except PrepareError as e:
+                pass
+            else:
+                storages.append(storage)
 
-        for key, value in section:
-            if key == 'ssh':
-                storage.set_ssh(value)
-            elif key == 'path':
-                storage.set_path(value)
-            elif key == 'temp':
-                storage.set_temp(value)
+        if len(storages) != 1:
+            raise PrepareError(
+                'storage section {!r} could not be parsed (requires ssh/path/'
+                'keys)'.format(name))
 
-        if not storage.is_complete():
-            raise ValueError(
-                'storage section {!r} is incomplete (needs ssh/path)'.format(
-                    name))
-
+        storage = storages[0]
+        storage.set_from_section(section)
         return storage
 
     def __init__(self, name):
         # Set from inifile.
         self.name = name
         self.ssh = None
-        self.type = None
         self.path = None
         self.temp = None
 
         # Set through command line.
         self.bwlimit = None
+
+    def check_prerequisites(self):
+        self.check_prerequisite_config()
+        self.check_prerequisite_commands()
+        # TODO: check temp paths (ticket #1?)
+
+    def check_prerequisite_config(self):
+        if not (self.ssh and self.path and self.temp):
+            raise PrepareError(
+                'missing one or more of ssh/path/temp in {!r} storage '
+                'section'.format(self.name))
+
+    def check_prerequisite_commands(self):
+        raise NotImplementedError('subclasses need to implemented this')
 
     def run_command(self, command, hide_stderr=False, tty=False):
         kwargs = {}
@@ -438,31 +495,32 @@ class ProxmoxStorage(object):
     def get_volume(self, location, properties):
         return ProxmoxVolume(location, properties, storage=self)
 
+    def set_from_section(self, section):
+        for key, value in section:
+            if key == 'ssh':
+                self.set_ssh(value)
+            elif key == 'path':
+                self.set_path(value)
+            elif key == 'temp':
+                self.set_temp(value)
+
     def set_ssh(self, value):
         if self.ssh:
             raise ValueError(
                 'duplicate ssh key in {!r} storage section: {}'.format(
                     self.name, value))
-        if value.startswith('-'):
+        if value.startswith('-'):  # TODO: nor spaces or quotes...
             raise ValueError(
                 'ssh value cannot start with an option-dash in {!r} '
-                'storage section: {}'.format(self.name, value))
+                'storage section: {!r}'.format(self.name, value))
         self.ssh = value
 
     def set_path(self, value):
-        if self.type:
+        if self.path:
             raise ValueError(
                 'duplicate path key in {!r} storage section: {}'.format(
                     self.name, value))
-        if value.startswith('/'):
-            self.type = 'plain'
-            self.path = value
-        elif value.startswith('zfs:'):
-            self.type, self.path = value.split(':', 1)
-            if ':' in self.path or '/' in self.path:
-                raise ValueError(
-                    'unexpected tokens in zfs pool in {!r} storage '
-                    'section: {}'.format(self.name, value))
+        self.path = value
 
     def set_temp(self, value):
         if self.temp:
@@ -475,11 +533,84 @@ class ProxmoxStorage(object):
                 'section: {}'.format(self.name, value))
         self.temp = value
 
-    def is_complete(self):
-        return self.ssh and self.type and self.path and self.temp
-
     def __str__(self):
         return self.name
+
+
+class ProxmoxStoragePlain(ProxmoxStorage):
+    @classmethod
+    def from_section(cls, name, section):
+        paths = [value for key, value in section if key == 'path']
+        if len(paths) != 1 or not paths[0].startswith('/'):
+            raise PrepareError('not my kind of config')
+
+        return cls(name)
+
+    def get_image_size(self, image_location):
+        path = os.path.join(self.path, image_location)
+        # Use ls -l instead of stat because stat %s/%z is not
+        # standardized across BSD/GNU.
+        try:
+            data = self.ssh_command(
+                ['ls', '-l', path], hide_stderr=True)
+        except subprocess.CalledProcessError:
+            return None
+
+        exact_size = data.split()[4].decode('ascii', 'replace')
+        return int(exact_size)
+
+    def check_prerequisite_commands(self):
+        if not self.has_commands(['ssh', 'scp']):
+            raise PrepareError(
+                'storage {!r} lacks ssh(1) or scp(1)'.format(
+                    self.name), file=sys.stderr)
+
+    def set_path(self, value):
+        if not value.startswith('/'):
+            raise ValueError(
+                'path should start with / in {!r} storage section: {}'.format(
+                    self.name, value))
+        return super().set_path(value[4:])
+
+
+class ProxmoxStorageZfs(ProxmoxStorage):
+    @classmethod
+    def from_section(cls, name, section):
+        paths = [value for key, value in section if key == 'path']
+        if len(paths) != 1 or not paths[0].startswith('zfs:'):
+            raise PrepareError('not my kind of config')
+
+        return cls(name)
+
+    def check_prerequisite_commands(self):
+        if not self.has_commands(['ssh', 'zfs', 'mbuffer']):
+            raise PrepareError(
+                'storage {!r} lacks ssh(1), zfs(1) or mbuffer(1)'.format(
+                    self.name))
+
+    def get_image_size(self, image_location):
+        temp_snapname = '{}/{}@temp-{}'.format(
+            self.path, image_location, random.random())
+        data = self.ssh_command(
+            ['zfs', 'snapshot', temp_snapname, ';'
+             'zfs', 'send', '-Rnv', temp_snapname, ';',
+             'zfs', 'destroy', temp_snapname], hide_stderr=True)
+        parts = data.split()
+        if not parts:
+            return None
+
+        human_size = parts[-1].decode('ascii', 'replace')
+        return human_size_scan(human_size)
+
+    def set_path(self, value):
+        assert value.startswith('zfs:'), value
+        pool_name = value[4:]
+        valid_characters = string.ascii_letters + string.digits + '_-'
+        if not all(i in valid_characters for i in pool_name):
+            raise PrepareError(
+                'invalid characters in zfs pool name found {!r} storage '
+                'section: {}'.format(self.name, value))
+        return super().set_path(pool_name)
 
 
 class ProxmoxVm(object):
@@ -683,38 +814,19 @@ class ProxmoxVolume(object):
                 ret.append(part)
         return ','.join(ret)
 
-    def get_info(self):
-        ret = {'size': None}
-
-        if not self.storage:
-            return ret
-
-        if self.storage.type == 'plain':
-            path = os.path.join(self.storage.path, self.location)
-            # Use ls -l instead of stat because stat %s/%z is not
-            # standardized across BSD/GNU.
-            try:
-                data = self.storage.ssh_command(
-                    ['ls', '-lh', path], hide_stderr=True)
-            except subprocess.CalledProcessError:
-                ret['size'] = None
+    def get_size(self):
+        if not hasattr(self, '_get_size'):
+            if self.storage:
+                self._get_size = self.storage.get_image_size(self.location)
             else:
-                ret['size'] = data.split()[4].decode('ascii', 'replace')  # str
-        elif self.storage.type == 'zfs':
-            temp_snapname = '{}/{}@temp-{}'.format(
-                self.storage.path, self.location, random.random())
-            data = self.storage.ssh_command(
-                ['zfs', 'snapshot', temp_snapname, ';'
-                 'zfs', 'send', '-Rnv', temp_snapname, ';',
-                 'zfs', 'destroy', temp_snapname], hide_stderr=True)
-            parts = data.split()
-            if parts:
-                ret['size'] = parts[-1].decode('ascii', 'replace')
-        else:
-            raise NotImplementedError(
-                'unsupported storage type {!r}'.format(self.storage.type))
+                self._get_size = None
+        return self._get_size
 
-        return ret
+    def get_human_size(self):
+        size = self.get_size()
+        if not size:
+            return '<unknown>'
+        return human_size_fmt(size)
 
     def clone(self, new_storage, new_vmid, new_key):
         """
@@ -725,7 +837,7 @@ class ProxmoxVolume(object):
         bw_limit_mbps = self.storage.get_bandwidth_limit()
 
         # Copy data from old storage.
-        if self.storage.type == 'plain':
+        if isinstance(self.storage, ProxmoxStoragePlain):
             source_path = os.path.join(self.storage.path, self.location)
             temp_dest_path = os.path.join(
                 new_storage.temp, 'temp-proxmove', new_name)
@@ -756,20 +868,20 @@ class ProxmoxVolume(object):
             scp_command.extend([source_path, scp_dest])
             # Exec.
             self.storage.ssh_command(scp_command, tty=True)
-        elif self.storage.type == 'zfs':
+        elif isinstance(self.storage, ProxmoxStorageZfs):
             # *from* ZFS
-            if new_storage.type == 'zfs':
+            if isinstance(new_storage, ProxmoxStorageZfs):
                 # We'll use ZFS send/recv.
                 temp_dest_path = None
             else:
                 # TODO: Simply cat /dev/zvol/.../... to the destfile?
                 raise NotImplementedError(
-                    'volume conversion from zfs to {!r} '
-                    'not implemented'.format(new_storage.type))
+                    'volume conversion from zfs to {} '
+                    'not implemented'.format(new_storage.__class__))
         else:
             raise NotImplementedError(
-                'volume conversion from {!r} not implemented'.format(
-                    self.storage.type))
+                'volume conversion from {} not implemented'.format(
+                    self.storage.__class__))
 
         # We now have temp data at: temp_dest_path
         if temp_dest_path:
@@ -777,7 +889,7 @@ class ProxmoxVolume(object):
                 temp_dest_path, new_storage))
 
         # Create room for new storage.
-        if new_storage.type == 'plain':
+        if isinstance(new_storage, ProxmoxStoragePlain):
             if old_format != 'qcow2':
                 raise NotImplementedError(
                     'format conversion from {!r} not implemented'.format(
@@ -803,17 +915,17 @@ class ProxmoxVolume(object):
             assert old_format == new_format
             cloned_volume = ProxmoxVolume(
                 rel_path, self.properties, storage=new_storage)
-        elif new_storage.type == 'zfs':
+        elif isinstance(new_storage, ProxmoxStorageZfs):
             # *to* ZFS
             zfs_name = '{}/{}'.format(new_storage.path, new_name)
 
-            if self.storage.type == 'zfs':
+            if isinstance(self.storage, ProxmoxStorageZfs):
                 # *from* ZFS *to* ZFS
                 src_zfs_name = '{}/{}@proxmove-{}'.format(
                     self.storage.path, self.location,
                     datetime.now().strftime('%y%m%d-%H%M%S'))
                 log.info('Copying {} data from {!r} to {!r} (on {})'.format(
-                    self.get_info()['size'], src_zfs_name, zfs_name,
+                    self.get_human_size(), src_zfs_name, zfs_name,
                     new_storage))
 
                 self.storage.ssh_command(
@@ -865,14 +977,14 @@ class ProxmoxVolume(object):
                             old_format))
             else:
                 raise NotImplementedError(
-                    'volume conversion from {!r} not implemented'.format(
-                        self.storage.type))
+                    'volume conversion from {} not implemented'.format(
+                        self.storage.__class__))
 
             cloned_volume = ProxmoxVolume(
                 new_name, self.get_properties_without('format'),
                 storage=new_storage)
         else:
-            raise NotImplementedError(new_storage.type)
+            raise NotImplementedError(new_storage.__class__)
 
         return cloned_volume
 
@@ -977,21 +1089,8 @@ class VmMover(object):
 
     def prepare_storage_prerequisites(self):
         log.debug('Checking storage prerequisites')
-
-        # TODO: refactor this into ProxmoxStorage..
         for storage in self.storages:
-            if storage.type == 'plain':
-                if not storage.has_commands(['ssh', 'scp']):
-                    raise PrepareError(
-                        'Storage {} lacks ssh(1) or scp(1)'.format(
-                            storage), file=sys.stderr)
-            elif storage.type == 'zfs':
-                if not storage.has_commands(['ssh', 'zfs', 'mbuffer']):
-                    raise PrepareError(
-                        'Storage {} lacks ssh(1), zfs(1) or mbuffer(1)'.format(
-                            storage), file=sys.stderr)
-
-        # TODO: check temp paths (ticket #1?)
+            storage.check_prerequisites()
 
     def prepare_storage_settings(self):
         log.debug('Set bandwidth limit on storage objects')
@@ -1034,9 +1133,8 @@ class VmMover(object):
 
         log.info('- source VM {}'.format(src_vm))
         for key, volume in src_vm.get_volumes().items():
-            info = volume.get_info()
             log.info('- storage {!r}: {} (blobsize={})'.format(
-                key, volume, info['size']))
+                key, volume, volume.get_human_size()))
 
         if not dry_run:
             # Translate config, create new VM.
