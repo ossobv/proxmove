@@ -22,6 +22,7 @@ Changes
   - Sometimes old values aren't available in the "pending" list. Don't croak.
     Closes #2.
   - Begun refactoring. Testing bettercodehub.com.
+  - Also check whether temporary (renamed) VMs exist before starting.
 
 * **v0.0.5** - 2016-08-30
 

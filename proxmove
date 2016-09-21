@@ -330,7 +330,7 @@ class ProxmoxCluster(object):
                 break
             time.sleep(1)
         else:
-            raise ProxmoxVm.Error('Could not get newly created VM {!r}'.format(
+            raise ProxmoveError('Could not get newly created VM {!r}'.format(
                 mutable_config['name']))
 
         log.info('- created new VM {!r}: {}'.format(vm.name, vm))
@@ -377,7 +377,7 @@ class ProxmoxCluster(object):
                 'VM named {!r} not found in cluster {!r}'.format(
                     name, self.name))
         elif len(res) > 1:
-            raise ProxmoxVm.Error(
+            raise ProxmoveError(
                 'VM named {!r} found multiple times in cluster {!r}'.format(
                     name, self.name))
         vm = self._vms[name] = ProxmoxVm.from_dict(
@@ -387,7 +387,7 @@ class ProxmoxCluster(object):
     def ping(self):
         version = self.api.version.get()
         if not isinstance(version, dict) or 'release' not in version:
-            raise ProxmoxVm.Error(
+            raise ProxmoveError(
                 'cluster {!r} did not return proper version: {!r}'.format(
                     version))
         self.repoid = version['repoid']
@@ -742,7 +742,7 @@ class ProxmoxVm(object):
                 break
         else:
             self.status = status['status']
-            raise ProxmoxVm.Error(
+            raise ProxmoveError(
                 'VM {!r} refuses to start: status = {!r}'.format(
                     self.name, self.status))
 
@@ -767,7 +767,7 @@ class ProxmoxVm(object):
                 break
         else:
             self.status = status['status']
-            raise ProxmoxVm.Error(
+            raise ProxmoveError(
                 'VM {!r} refuses to shut down: status = {!r}'.format(
                     self.name, self.status))
 
@@ -1068,26 +1068,41 @@ class VmMover(object):
         self.prepare_storage_settings()
 
     def prepare_vm_list(self):
-        log.debug('Checking that the VMs exist on only the source')
+        log.debug('Checking VMs existence on source and destination')
         vms = []
         for vm_name in self.vms_requested:
-            try:
-                # TODO: Check whether the --CREATED version exists?
-                self.dst_pve.get_vm(vm_name)
-            except ProxmoxVm.DoesNotExist:
-                pass
-            else:
-                if not self.ignore_exists:
-                    raise PrepareError(
-                        'VM {!r} exists on destination already'.format(
-                            vm_name))
-
-            # Get the current one, check validity and add to list.
+            self.prepare_vm_check_source(vm_name)
+            self.prepare_vm_check_destination(vm_name)
             vm = self.src_pve.get_vm(vm_name)
             vms.append(vm)
 
         self.vms_to_move = vms
         self.vms_requested = None
+
+    def prepare_vm_check_source(self, vm_name):
+        for suffix in (SUFFIX_CLONING, SUFFIX_MIGRATED):
+            vm_name_with_suffix = '{}{}'.format(vm_name, suffix)
+            try:
+                self.src_pve.get_vm(vm_name_with_suffix)
+            except ProxmoxVm.DoesNotExist:
+                pass
+            else:
+                raise PrepareError(
+                    'VM {!r} exists on source already'.format(
+                        vm_name_with_suffix))
+
+    def prepare_vm_check_destination(self, vm_name):
+        for suffix in ('', SUFFIX_CREATING):
+            vm_name_with_suffix = '{}{}'.format(vm_name, suffix)
+            try:
+                self.dst_pve.get_vm(vm_name_with_suffix)
+            except ProxmoxVm.DoesNotExist:
+                pass
+            else:
+                if not (self.ignore_exists and not suffix):
+                    raise PrepareError(
+                        'VM {!r} exists on destination already'.format(
+                            vm_name_with_suffix))
 
     def prepare_vm_checks(self):
         log.debug('Checking for pending changes in {} VMs to move'.format(
