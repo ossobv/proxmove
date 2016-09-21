@@ -59,7 +59,7 @@ def human_size_fmt(num, suffix='B'):
     return '{:.1f}{}{}'.format(num, 'Ti', suffix)
 
 
-def human_size_scan(num_str):
+class _HumanSizeScan(object):
     multipliers = {
         'T': 1024 * 1024 * 1024 * 1024,
         'G': 1024 * 1024 * 1024,
@@ -68,29 +68,34 @@ def human_size_scan(num_str):
         'B': 1,
     }
 
-    num_str = num_str.lstrip()
-    num_parts = []
-    suffix = ''
-    for i, ch in enumerate(num_str):
-        if ch in '0123456789.':
-            num_parts.append(ch)
-        elif ch == ',':
-            pass
+    def __call__(self, num_str):
+        numeric, suffix = self.split(num_str)
+        if '.' in numeric:
+            numeric = float(numeric)
         else:
-            suffix = num_str[i:].strip()
-            break
+            numeric = int(numeric)
+        multiplier = self.multipliers.get(suffix[0:1].upper())
+        if not multiplier:
+            if suffix:
+                raise ValueError('unknown suffix found in {!r}'.format(
+                    num_str))
+            multiplier = 1
+        return int(numeric * multiplier)
 
-    if '.' in num_parts:
-        num_parts = float(''.join(num_parts))
-    else:
-        num_parts = int(''.join(num_parts))
-
-    multiplier = multipliers.get(suffix[0:1].upper())
-    if multiplier:
-        return int(num_parts * multiplier)
-    if not suffix:
-        return int(suffix)
-    raise ValueError('unknown suffix found in {!r}'.format(num_str))
+    def split(self, num_str):
+        num_str = num_str.lstrip()
+        num_parts = []
+        suffix = ''
+        for i, ch in enumerate(num_str):
+            if ch in '0123456789.':
+                num_parts.append(ch)
+            elif ch == ',':
+                pass
+            else:
+                suffix = num_str[i:].strip()
+                break
+        return ''.join(num_parts), suffix
+human_size_scan = _HumanSizeScan()
 
 
 class ProxmoveError(Exception):
