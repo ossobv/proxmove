@@ -1223,7 +1223,7 @@ class VmMover(object):
                 dst_vm.ensure_started()
 
             log.info('Completed moving {} => {} (node {!r}): {}'.format(
-                self.src_pve, self.dst_pve, self.dst_node, src_vm.name))
+                self.src_pve, self.dst_pve, self.dst_node, dst_vm.name))
 
 
 class CommandLoader(object):
