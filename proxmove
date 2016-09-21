@@ -432,7 +432,7 @@ class ProxmoxStorage(object):
     def check_prerequisites(self):
         self.check_prerequisite_config()
         self.check_prerequisite_commands()
-        # TODO: check temp paths (ticket #1?)
+        self.check_prerequisite_paths()
 
     def check_prerequisite_config(self):
         if not (self.ssh and self.path and self.temp):
@@ -442,6 +442,14 @@ class ProxmoxStorage(object):
 
     def check_prerequisite_commands(self):
         raise NotImplementedError('subclasses need to implemented this')
+
+    def check_prerequisite_paths(self):
+        try:
+            self.ssh_command(['test', '-d', self.temp])
+        except subprocess.CalledProcessError:
+            raise PrepareError(
+                'temp dir {!r} of storage {!r} does not exist; '
+                'please create it!'.format(self.temp, self.name))
 
     def run_command(self, command, hide_stderr=False, tty=False):
         kwargs = {}
@@ -848,16 +856,6 @@ class ProxmoxVolume(object):
             log.info('SCP copy from {!r} (on {}) to {!r}'.format(
                 source_path, self.storage, scp_dest))
 
-            # Test whether "temp" exists, and die if it doesn't.
-            # TODO: we should do this earlier..
-            try:
-                new_storage.ssh_command(
-                    ['test', '-d', new_storage.temp])
-            except subprocess.CalledProcessError:
-                raise ValueError(
-                    'temp dir {!r} of san {!r} does not exist; '
-                    'please create it!'.format(
-                        new_storage.temp, new_storage.name))
             # mkdir
             new_storage.ssh_command(
                 ['mkdir', '-p', os.path.dirname(temp_dest_path)])
