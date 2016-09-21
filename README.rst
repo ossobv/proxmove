@@ -52,7 +52,7 @@ When configured, you can do something like this:
 .. code-block:: console
 
     $ proxmove banana-cluster the-new-cluster node2 node2-ssd the-vm-to-move
-    12:12:27: Requested move banana-cluster<e1400248> => the-new-cluster<6669ad2c> (node 'node2'): the-vm-to-move
+    12:12:27: Attempt moving banana-cluster<e1400248> => the-new-cluster<6669ad2c> (node 'node2'): the-vm-to-move
     12:12:27: - source VM the-vm-to-move@node1<qemu/565/running>
     12:12:27: - storage 'ide2': None,media=cdrom (blobsize=None)
     12:12:27: - storage 'virtio0': sharedsan:565/vm-565-disk-1.qcow2,format=qcow2,iops_rd=4000,iops_wr=500,size=50G (blobsize=53705113600)
@@ -74,7 +74,7 @@ When configured, you can do something like this:
     12:24:25: Removing temp '/node2-ssd/temp/temp-proxmove/vm-126-virtio0' (on local-ssd)
     12:24:26: Starting VM the-vm-to-move@node2<qemu/126/stopped>
     12:24:27: - started VM the-vm-to-move@node2<qemu/126/running>
-    12:24:27: Completed move banana-cluster<e1400248> => the-new-cluster<6669ad2c> (node 'node2'): the-vm-to-move
+    12:24:27: Completed moving banana-cluster<e1400248> => the-new-cluster<6669ad2c> (node 'node2'): the-vm-to-move
 
 Before, ``the-vm-to-move`` was running on ``banana-cluster`` on ``node1``.
 
