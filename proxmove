@@ -1057,6 +1057,9 @@ class VmMover(object):
         self.vms_requested = options.vm
 
         self.ignore_exists = options.ignore_exists
+        self.skip_disks = options.skip_disks
+        # Don't start if there are no disks..
+        self.skip_start = options.skip_start or options.skip_disks
 
         self.vms_to_move = None
         self.storages = None
@@ -1165,7 +1168,7 @@ class VmMover(object):
         # - stop old host, rename to "CLONING"
         # - move all disks, one by one
         # - rename dest to real name, rename source to "MIGRATED", add comment
-        log.info('Move {} => {} (node {!r}): {}'.format(
+        log.info('Request move {} => {} (node {!r}): {}'.format(
             self.src_pve, self.dst_pve, self.dst_node, src_vm.name))
 
         log.info('- source VM {}'.format(src_vm))
@@ -1184,13 +1187,17 @@ class VmMover(object):
             src_vm.ensure_stopped()
             src_vm.rename(src_vm_name + SUFFIX_CLONING)
             for key, volume in src_vm.get_volumes().items():
-                if key not in dst_vm.get_volumes():
-                    if volume.is_removable():
-                        dst_vm.create_volume(
-                            key, volume, storage=None)  # "eject"
-                    else:
-                        dst_vm.create_volume(
-                            key, volume, storage=self.dst_storage)
+                assert key not in dst_vm.get_volumes(), key
+
+                if volume.is_removable():
+                    storage = None  # eject
+                elif self.skip_disks:
+                    log.debug('Not copying volume {} as requested'.format(key))
+                    storage = None
+                else:
+                    storage = self.dst_storage
+
+                dst_vm.create_volume(key, volume, storage=storage)
 
             # Done? Rename both.
             dst_vm.rename(dst_config['name'])
@@ -1199,7 +1206,13 @@ class VmMover(object):
                 datetime.utcnow(), dst_vm))
 
             # Start VM.
-            dst_vm.ensure_started()
+            if self.skip_start:
+                log.debug('Not starting VM as requested')
+            else:
+                dst_vm.ensure_started()
+
+            log.info('Completed move {} => {} (node {!r}): {}'.format(
+                self.src_pve, self.dst_pve, self.dst_node, src_vm.name))
 
 
 class CommandLoader(object):
@@ -1245,6 +1258,13 @@ class CommandLoader(object):
         self.parser.add_argument(
             '--bwlimit', action='store', metavar='MBPS', type=int, help=(
                 'limit bandwidth in Mbit/s'))
+        self.parser.add_argument(
+            '--skip-disks', action='store_true', help=(
+                'do the move, but skip copying of the disks; '
+                'implies --skip-start'))
+        self.parser.add_argument(
+            '--skip-start', action='store_true', help=(
+                'do the move, but do not start the new instance'))
         self.parser.add_argument(
             '--version', action='version', version=(
                 'proxmove {}'.format(__version__)))

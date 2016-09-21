@@ -11,7 +11,8 @@ proxmove helps you move VMs between PVE-clusters with minimal hassle.
 
 .. code-block:: console
 
-    usage: proxmove [-h] [-c FILENAME] [-n] [--bwlimit MBPS] [--version]
+    usage: proxmove [-h] [-c FILENAME] [-n] [--bwlimit MBPS] [--skip-disks]
+                    [--skip-start] [--version]
                     source destination nodeid storage vm [vm ...]
 
     Migrate VMs from one Proxmox cluster to another.
@@ -29,6 +30,9 @@ proxmove helps you move VMs between PVE-clusters with minimal hassle.
                             use alternate configuration inifile
       -n, --dry-run         stop before doing any writes
       --bwlimit MBPS        limit bandwidth in Mbit/s
+      --skip-disks          do the move, but skip copying of the disks; implies
+                            --skip-start
+      --skip-start          do the move, but do not start the new instance
       --version             show program's version number and exit
 
     Cluster aliases and storage locations should be defined in ~/.proxmoverc (or
@@ -48,7 +52,7 @@ When configured, you can do something like this:
 .. code-block:: console
 
     $ proxmove banana-cluster the-new-cluster node2 node2-ssd the-vm-to-move
-    12:12:27: Move banana-cluster<e1400248> => the-new-cluster<6669ad2c> (node 'node2'): the-vm-to-move
+    12:12:27: Requested move banana-cluster<e1400248> => the-new-cluster<6669ad2c> (node 'node2'): the-vm-to-move
     12:12:27: - source VM the-vm-to-move@node1<qemu/565/running>
     12:12:27: - storage 'ide2': None,media=cdrom (blobsize=None)
     12:12:27: - storage 'virtio0': sharedsan:565/vm-565-disk-1.qcow2,format=qcow2,iops_rd=4000,iops_wr=500,size=50G (blobsize=53705113600)
@@ -70,6 +74,7 @@ When configured, you can do something like this:
     12:24:25: Removing temp '/node2-ssd/temp/temp-proxmove/vm-126-virtio0' (on local-ssd)
     12:24:26: Starting VM the-vm-to-move@node2<qemu/126/stopped>
     12:24:27: - started VM the-vm-to-move@node2<qemu/126/running>
+    12:24:27: Completed move banana-cluster<e1400248> => the-new-cluster<6669ad2c> (node 'node2'): the-vm-to-move
 
 Before, ``the-vm-to-move`` was running on ``banana-cluster`` on ``node1``.
 

@@ -9,6 +9,9 @@ Changes
     the scp(1) -l option or for ZFS use the mbuffer(1) auxiliary. As an
     added bonus mbuffer may improve ZFS send/recv speed through
     buffering. Closes #4.
+  - Add --skip-disks option to skip copying of the disks. Use this if
+    you want to copy the disks manually. Closes #3.
+  - Add --skip-start option to skip autostarting of the VM.
   - Adds optional pv(1) pipe viewer progress bar to get ETA in ZFS
     transfers.
   - Add hidden --debug option for more verbosity.
