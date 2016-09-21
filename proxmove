@@ -655,30 +655,27 @@ class ProxmoxVm(object):
         """
         Check whether we can move this VM.
         """
-        if 'pending' not in self._cache:
-            config = self.get_config()
+        config = self.get_config()
 
-            # Check pending.
-            pending_config = self.api_vm.pending.get()  # may not exist for lxc
-            pending = []
-            for dict_ in pending_config:
-                keys = dict_.keys()
-                if keys == set(['key', 'value']):
-                    assert config.get(dict_['key']) == dict_['value']
-                else:
-                    pending.append('{!r}: {!r} => {!r}'.format(
-                        dict_['key'], dict_.get('value'),
-                        dict_.get('pending')))
+        # Check pending. We expect a list of dictionaries with a 'key'
+        # key and 'value' and/or 'pending' keys.
+        pending_config = self.api_vm.pending.get()  # may not exist for lxc
+        pending = []
+        for dict_ in pending_config:
+            keys = dict_.keys()
+            if keys == set(['key', 'value']):
+                assert config.get(dict_['key']) == dict_['value']
+            else:
+                pending.append('{!r}: {!r} => {!r}'.format(
+                    dict_['key'], dict_.get('value'),
+                    dict_.get('pending')))
 
-            if pending:
-                # Contains 'pending' changes. Refuse to continue.
-                pending.sort()
-                raise PrepareError(
-                    'VM {!r} contains pending changes:\n  {}'.format(
-                        self.name, '\n  '.join(pending)))
-
-            self._cache['pending'] = None  # nothing to return
-        return self._cache['pending']
+        if pending:
+            # Contains 'pending' changes. Refuse to continue.
+            pending.sort()
+            raise PrepareError(
+                'VM {!r} contains pending changes:\n  {}'.format(
+                    self.name, '\n  '.join(pending)))
 
     def get_config(self):
         """
