@@ -745,10 +745,11 @@ class ProxmoxVm(object):
             log.debug('Skipping stop, already stopped: {}'.format(self))
             return
 
-        log.info('Stopping VM {}'.format(self))
+        log.info('Stopping VM {}; will forcibly kill after {} seconds'.format(
+            self, timeout + 10))
 
         # forceStop takes a boolean, but proxmoxer won't pass True as
-        # "true", but as True.
+        # 'true', but as 'True' which is not valid JSON.
         self.api_vm.status.shutdown.create(forceStop='1', timeout=timeout)
         for i in range(timeout + 10):
             time.sleep(1)
@@ -941,7 +942,7 @@ class ProxmoxVolume(object):
 
                 if new_storage.has_commands(['pv']) and self.get_size():
                     log.debug(
-                        "Using pv(1) for progress bar because it's available.")
+                        "Using pv(1) for progress bar because it's available")
                     optional_pv_pipe = (
                         # --fineta does not exist on all versions..
                         # --force is required to make it display anything..
