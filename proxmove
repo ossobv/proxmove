@@ -54,9 +54,9 @@ PROXMOX_VOLUME_TYPES = ('ide', 'sata', 'scsi', 'virtio')
 def human_size_fmt(num, suffix='B'):
     for unit in ('', 'Ki', 'Mi', 'Gi', 'Ti'):
         if abs(num) < 1024.0:
-            return "%3.1f%s%s" % (num, unit, suffix)
+            return '{:3.1f}{}{}'.format(num, unit, suffix)
         num /= 1024.0
-    return "%.1f%s%s" % (num, 'Ti', suffix)
+    return '{:.1f}{}{}'.format(num, 'Ti', suffix)
 
 
 def human_size_scan(num_str):
@@ -360,7 +360,7 @@ class ProxmoxCluster(object):
             if prev + 1 != vmid:
                 return prev + 1
             prev = vmid
-        raise NotImplementedError('This cannot happen: {}'.format(
+        raise NotImplementedError('this cannot happen: {}'.format(
             ordered_vms))
 
     def get_random_node(self):
@@ -1092,9 +1092,8 @@ class VmMover(object):
         self.vms_requested = None
 
     def prepare_vm_checks(self):
-        log.debug(
-            'Checking for pending changes in %d VMs to move',
-            len(self.vms_to_move))
+        log.debug('Checking for pending changes in {} VMs to move'.format(
+            len(self.vms_to_move)))
 
         for vm in self.vms_to_move:
             vm.check_config()
@@ -1106,9 +1105,8 @@ class VmMover(object):
                 if volume.storage:
                     storages.add(volume.storage)
 
-        log.debug(
-            'Found %d relevant storages: %s', len(storages),
-            ', '.join(str(i) for i in storages))
+        log.debug('Found {} relevant storages: {}'.format(
+            len(storages), ', '.join(str(i) for i in storages)))
         self.storages = storages
 
     def prepare_storage_prerequisites(self):
