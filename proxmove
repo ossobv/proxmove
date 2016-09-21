@@ -30,12 +30,10 @@ from urllib.parse import urlparse
 __author__ = 'Walter Doekes'
 __copyright__ = 'Copyright (C) Walter Doekes, OSSO B.V. 2016'
 __licence__ = 'GPLv3+'
-__version__ = '0.0.5.1'
+__version__ = '0.0.6'
 
-# TODO:
-# - see NotImplementedError
-# - see other TODO :D
-# - split up into files?
+# TODO: see NotImplementedErrors
+# TODO: split up into modules (storage, etc.)
 
 log = logging.getLogger('proxmove')
 

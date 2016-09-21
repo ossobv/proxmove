@@ -1,7 +1,7 @@
 Changes
 -------
 
-* **vHEAD** - XXXX-XX-XX
+* **v0.0.6** - 2016-09-21
 
   New features:
 
