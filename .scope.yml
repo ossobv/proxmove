@@ -10,3 +10,5 @@ languages:
       include:
         # The CLI app lacks extension.
         - /proxmove
+      exclude:
+        - /setup.py
