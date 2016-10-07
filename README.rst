@@ -54,8 +54,8 @@ When configured, you can do something like this:
     $ proxmove banana-cluster the-new-cluster node2 node2-ssd the-vm-to-move
     12:12:27: Attempt moving banana-cluster<e1400248> => the-new-cluster<6669ad2c> (node 'node2'): the-vm-to-move
     12:12:27: - source VM the-vm-to-move@node1<qemu/565/running>
-    12:12:27: - storage 'ide2': None,media=cdrom (blobsize=None)
-    12:12:27: - storage 'virtio0': sharedsan:565/vm-565-disk-1.qcow2,format=qcow2,iops_rd=4000,iops_wr=500,size=50G (blobsize=50GiB)
+    12:12:27: - storage 'ide2': None,media=cdrom (host=<unknown>, guest=<unknown>)
+    12:12:27: - storage 'virtio0': sharedsan:565/vm-565-disk-1.qcow2,format=qcow2,iops_rd=4000,iops_wr=500,size=50G (host=37.7GiB, guest=50.0GiB)
     12:12:27: Creating new VM 'the-vm-to-move' on 'the-new-cluster', node 'node2'
     12:12:27: - created new VM 'the-vm-to-move--CREATING' as UPID:node2:00005977:1F4D78F4:57C55C0B:qmcreate:126:user@pve:; waiting for it to show up
     12:12:34: - created new VM 'the-vm-to-move--CREATING': the-vm-to-move--CREATING@node2<qemu/126/stopped>

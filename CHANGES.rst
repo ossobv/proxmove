@@ -1,6 +1,15 @@
 Changes
 -------
 
+* **v0.0.7** - 2016-10-07
+
+  Bugs fixed:
+
+  - Instead of trusting on the "size=XXG" which may or may not be
+    present in the storage volume config, it reads the QCOW header or
+    ZFS volume size directly. Also checks that the values are available
+    before attempting a move.
+
 * **v0.0.6** - 2016-09-21
 
   New features:
