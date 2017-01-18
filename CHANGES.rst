@@ -3,6 +3,10 @@ Changes
 
 * **HEAD** - xxxx-xx-xx
 
+  New features:
+
+  - Partial LXC container move implemented. Not complete.
+
 * **v0.0.7** - 2016-10-07
 
   Bugs fixed:

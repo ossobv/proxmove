@@ -96,6 +96,20 @@ class _HumanSizeScan(object):
 human_size_scan = _HumanSizeScan()
 
 
+def name_from_conf(type_, config):
+    """
+    For 'lxc', the unique name is in 'hostname'. For others it is in 'name'.
+    """
+    if type_ == 'lxc':
+        assert 'name' not in config, config
+        assert 'hostname' in config, config
+        return config['hostname']
+
+    assert 'hostname' not in config, config
+    assert 'name' in config, config
+    return config['name']
+
+
 class ProxmoveError(Exception):
     pass
 
@@ -299,34 +313,65 @@ class ProxmoxCluster(object):
             nodeid = self.get_random_node()
 
         log.info('Creating new VM {!r} on {!r}, node {!r}'.format(
-            config['name'], self.name, nodeid))
+            name_from_conf(type_, config), self.name, nodeid))
 
         # Create disks according to config. Temporarily set ide\d+ and
         # virtio\d+ devices to none until we can get them copied over.
         mutable_config = {}
         for key, value in config.items():
-            if key == 'name':
+            if ((type_ == 'lxc' and key == 'hostname') or
+                    (type_ != 'lxc' and key == 'name')):
                 mutable_config[key] = value + SUFFIX_CREATING
+
             elif re.match(
                     '^({})\d+$'.format('|'.join(PROXMOX_VOLUME_TYPES)), key):
                 # Wipe it. We'll add the disks manually later on.
                 pass
+
             else:
                 mutable_config[key] = value
 
-        # Guess new VMID and create one.
+        # Guess new VMID.
         vmid = self.get_free_vmid()
+
+        if type_ == 'lxc':
+            # LXC(FIXME): We need to create the dst filesystem here.
+            # A matter of:
+            #   zfs create -o refquota=HUMAN_SIZE ZFS_PATH_NO_LEAD_SLASH
+            # For example:
+            #   zfs create -o refquota=20G rpool/data/images/subvol-160-disk-1
+            # Next: decide whether we want a super-minimal tar.gz which we'll
+            # simply overwrite during the filesystem copy, or do the copy first
+            # and "install" that image.
+            # Note: possibly also PVEDatastoreAdmin permissions are required
+            # for the untar.
+            assert 'ostemplate' not in mutable_config, mutable_config
+            mutable_config['ostemplate'] = (
+                # Note that 'vztmpl' is a magic constant that defines
+                # that this is a tar.gz source filesystem. See
+                # PVE/Storage/Plugin.pm. Also, for sane debugging of
+                # 500-errors, do an ngrep on port 85 on the destination
+                # host (lo-interface) to get a few more clues.
+                # This file is hardcoded for now, and will not work on
+                # your system.
+                'SRCDISK:vztmpl/ubuntu-14.04-standard_14.04-1_amd64.tar.gz')
+            mutable_config['rootfs'] = (
+                # This requires a leading zfs create. See comments above.
+                'DSTDISK:subvol-{vmid}-disk-1,size=20G'.format(
+                    vmid=vmid))
+
+        # Create new VM.
         api_node = self.api.nodes(nodeid)
         vmhash = getattr(api_node, type_).create(vmid=vmid, **mutable_config)
 
         # Wait a while to ensure that we get the VM.
         log.info(
             '- created new VM {!r} as {}; waiting for it to show up'.format(
-                mutable_config['name'], vmhash))
+                name_from_conf(type_, mutable_config), vmhash))
         for i in range(30):
             try:
                 self._cache = {}  # purge cache, we expect changes
-                vm = self.get_vm(mutable_config['name'])
+                vm = self.get_vm(name_from_conf(type_, mutable_config))
             except ProxmoxVm.DoesNotExist:
                 pass
             else:
@@ -334,7 +379,7 @@ class ProxmoxCluster(object):
             time.sleep(1)
         else:
             raise ProxmoveError('Could not get newly created VM {!r}'.format(
-                mutable_config['name']))
+                name_from_conf(type_, mutable_config)))
 
         log.info('- created new VM {!r}: {}'.format(vm.name, vm))
         return vm
@@ -840,7 +885,22 @@ class ProxmoxVm(object):
         vm = cls(
             dict_['name'], dict_['node'], dict_['type'], dict_['vmid'],
             dict_['status'], api, cluster)
-        vm.get_config()  # get config and check for pending changes at once
+
+        # LXC(FIXME): When creating an LXC container, the get_config()
+        # may contain a 'digest' only. We need to wait until its fully
+        # populated with at least the name. This is a hack, and we
+        # definitely should not use AssertionError for it.
+        for i in range(10):
+            try:
+                # Get config and check for pending changes at once.
+                vm.get_config()
+            except AssertionError:
+                time.sleep(1)
+            else:
+                break
+        else:
+            raise
+
         return vm
 
     def __init__(self, name, node, type_, id_, status, api, cluster):
@@ -858,11 +918,15 @@ class ProxmoxVm(object):
         """
         Check whether we can move this VM.
         """
+        if self.type == 'lxc':
+            # No pending changes
+            return
+
         config = self.get_config()
 
         # Check pending. We expect a list of dictionaries with a 'key'
         # key and 'value' and/or 'pending' keys.
-        pending_config = self.api_vm.pending.get()  # may not exist for lxc
+        pending_config = self.api_vm.pending.get()  # does not exist for lxc
         pending = []
         for dict_ in pending_config:
             keys = dict_.keys()
@@ -886,7 +950,7 @@ class ProxmoxVm(object):
         """
         if 'config' not in self._cache:
             next_config = self.api_vm.config.get()
-            self.name = next_config['name']
+            self.name = name_from_conf(self.type, next_config)
             self._cache['config'] = next_config
         return self._cache['config']
 
@@ -928,7 +992,11 @@ class ProxmoxVm(object):
         return self._cache['volumes']
 
     def rename(self, new_name):
-        self.api_vm.config.put(name=new_name)
+        if self.type == 'lxc':
+            self.api_vm.config.put(hostname=new_name)
+        else:
+            self.api_vm.config.put(name=new_name)
+
         self.name = new_name
 
     def ensure_started(self, timeout=120):
@@ -1287,6 +1355,33 @@ class VmMover(object):
             # Stop old VM, create storage, copy storage.
             src_vm.ensure_stopped()
             src_vm.rename(src_vm_name + SUFFIX_CLONING)
+
+            # LXC(FIXME): Here we should migrate/copy the ROOTFS data
+            # for LXC too. Example old config: {
+            #  'rootfs': 'pool0-pve2-ssd:subvol-105-disk-1,size=20G',
+            #  'searchdomain': '91.xxx.xxx.xx', 'cpuunits': 1024,
+            #  'cpulimit': '2', 'swap': 0, 'hostname': 'osso-xxxxxxxxxxxxxx',
+            #  'net1': 'bridge=vmbr535,hwaddr=32:xx:xx:xx:xx:xx,'
+            #      'ip=10.xx.xx.xx/24,name=eth1,type=veth',
+            #  'memory': 2048, 'net0': 'bridge=vmbr0,gw=10.xxx.x.x,'
+            #      'hwaddr=66:xx:xx:xx:xx:xx,ip=10.xxx.x.xx/24,'
+            #      'name=eth0,type=veth',
+            #  'ostype': 'ubuntu', 'nameserver': '91.xxx.xxx.xx 8.8.8.8',
+            #  'arch': 'amd64'}
+            # Example new config: {
+            #  'rootfs': 'mc11-6-local-ssd:subvol-160-disk-1,size=20G',
+            #  'searchdomain': '91.xxx.xxx.xx', 'cpuunits': 1024,
+            #  'ostemplate':
+            #      # Note that 'vztmpl' is hardcoded in PVE/Storage/Plugin.pm
+            #      'san06:vztmpl/ubuntu-14.04-standard_14.04-1_amd64.tar.gz',
+            #  'arch': 'amd64', 'cpulimit': '2',
+            #  'hostname': 'osso-swift-mgmt-tcn--CREATING',
+            #  'nameserver': '91.xxx.xxx.xx 8.8.8.8', 'memory': 2048,
+            #  'net0': 'bridge=vmbr0,gw=10.xxx.x.x,hwaddr=66:xx:xx:xx:xx:xx,'
+            #      'ip=10.xxx.x.xx/24,name=eth0,type=veth', 'ostype': 'ubuntu',
+            #  'net1': 'bridge=vmbr535,hwaddr=32:xx:xx:xx:xx:xx,'
+            #      'ip=10.xx.xx.xx/24,name=eth1,type=veth', 'swap': 0}
+
             for key, volume in src_vm.get_volumes().items():
                 assert key not in dst_vm.get_volumes(), key
 
@@ -1301,7 +1396,7 @@ class VmMover(object):
                 dst_vm.create_volume(key, volume, storage=storage)
 
             # Done? Rename both.
-            dst_vm.rename(dst_config['name'])
+            dst_vm.rename(name_from_conf(dst_vm.type, dst_config))
             src_vm.rename(src_vm_name + SUFFIX_MIGRATED)
             src_vm.add_comment('{} UTC: Migrated to {}'.format(
                 datetime.utcnow(), dst_vm))
