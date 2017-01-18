@@ -868,8 +868,9 @@ class ProxmoxStorageZfs(ProxmoxStorage):
     def set_path(self, value):
         assert value.startswith('zfs:'), value
         pool_name = value[4:]
-        valid_characters = string.ascii_letters + string.digits + '_-'
-        if not all(i in valid_characters for i in pool_name):
+        valid_characters = string.ascii_letters + string.digits + '_-/'
+        if not pool_name or pool_name.startswith('/') or not all(
+                i in valid_characters for i in pool_name):
             raise PrepareError(
                 'invalid characters in zfs pool name found {!r} storage '
                 'section: {}'.format(self.name, value))

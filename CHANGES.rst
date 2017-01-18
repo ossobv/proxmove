@@ -7,6 +7,12 @@ Changes
 
   - Partial LXC container move implemented. Not complete.
 
+  Bugs fixed:
+
+  - Allow ZFS paths to be more than just the a pool name. Instead of
+    e.g. ``path=zfs:mc9-8-ssd`` we now also allow
+    ``path=zfs:rpool/data/images``. Closes #7.
+
 * **v0.0.7** - 2016-10-07
 
   Bugs fixed:
