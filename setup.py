@@ -6,17 +6,20 @@ with open('proxmove') as fp:
         if line.startswith('__version__'):
             version = line.split("'")[1]
             break
-with open('README.rst') as fp:
-    long_description = fp.read()
-with open('CHANGES.rst') as fp:
-    long_description += '\n\n' + fp.read()
+
+long_description = []
+for filename in ('README.rst', 'CHANGES.rst', 'TODO.rst'):
+    with open(filename) as fp:
+        long_description.append(fp.read())
+long_description = '\n\n'.join(long_description)
 
 
 setup(
     name='proxmove',
     version=version,
     scripts=['proxmove'],
-    data_files=[('', ['README.rst', 'CHANGES.rst', 'proxmoverc.sample'])],
+    data_files=[('', [
+        'README.rst', 'CHANGES.rst', 'TODO.rst', 'proxmoverc.sample'])],
     description=(
         'Migrate virtual machines between different Proxmox VM clusters'),
     long_description=long_description,

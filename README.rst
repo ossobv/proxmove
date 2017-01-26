@@ -125,8 +125,8 @@ referred to as ``sharedsan:VMID/vm-VMID-disk1.qcow2``.
     temp=/srv/temp
 
 If you use ZFS storage on *the-new-cluster*, the storage bits could look
-like this. Disk volumes exist on the ZFS pool ``node1-ssd`` and
-``node2-ssd`` on the nodes *node1* and *node2* respectively.
+like this. Disk volumes exist on the ZFS filesystem ``node1-ssd/images``
+and ``node2-ssd/images`` on the nodes *node1* and *node2* respectively.
 
 Note that the ``temp=`` path is always a regular path.
 
@@ -134,12 +134,12 @@ Note that the ``temp=`` path is always a regular path.
 
     [storage:the-new-cluster:node1-ssd@node1]
     ssh=root@node1.the-new-cluster.com
-    path=zfs:node1-ssd
+    path=zfs:node1-ssd/images
     temp=/node1-ssd/temp
 
     [storage:the-new-cluster:node2-ssd@node2]
     ssh=root@node2.the-new-cluster.com
-    path=zfs:node2-ssd
+    path=zfs:node2-ssd/images
     temp=/node2-ssd/temp
 
 The config file looks better with indentation. The author suggests this layout:
