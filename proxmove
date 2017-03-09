@@ -792,7 +792,7 @@ class ProxmoxStorageZfs(ProxmoxStorage):
                        dst_name):
         assert disk_size, disk_size
         dst_zfs = '{}/{}'.format(self.path, dst_name)
-        self.ssh_command(['zfs', 'create', '-V', disk_size, dst_zfs])
+        self.ssh_command(['zfs', 'create', '-V', str(disk_size), dst_zfs])
 
         dst_path = os.path.join('/dev/zvol', self.path, dst_name)
         log.info('Writing data from temp {!r} to {!r} (on {})'.format(
