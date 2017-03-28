@@ -1,7 +1,16 @@
 Changes
 -------
 
-* **HEAD** - XXXX-XX-XX
+* **0.0.9** - 2017-03-28
+
+  New features:
+
+  - Added --no-verify-ssl option.
+
+  Bugs fixed:
+
+  - Fix str-cast bug with ZFS destination creation.
+  - Fix ignoring of non-volume properties like "scsihw".
 
 * **0.0.8** - 2017-01-26
 
