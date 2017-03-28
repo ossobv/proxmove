@@ -34,6 +34,7 @@ __version__ = '0.0.9a'
 
 # TODO: see NotImplementedErrors
 # TODO: split up into modules (storage, etc.)
+# TODO: add option to disable ssl validation on the cmdline
 
 log = logging.getLogger('proxmove')
 
@@ -47,6 +48,8 @@ SUFFIX_CLONING = '--CLONING'    # source, when cloning
 SUFFIX_CREATING = '--CREATING'  # dest, while cloning
 SUFFIX_MIGRATED = '--MIGRATED'  # source, when done
 PROXMOX_VOLUME_TYPES = ('ide', 'sata', 'scsi', 'virtio')
+PROXMOX_VOLUME_TYPES_RE = re.compile(  # "scsi0", but not "scsihw"
+    r'^({})\d+$'.format('|'.join(PROXMOX_VOLUME_TYPES)))
 
 
 def human_size_fmt(num, suffix='B'):
@@ -323,8 +326,7 @@ class ProxmoxCluster(object):
                     (type_ != 'lxc' and key == 'name')):
                 mutable_config[key] = value + SUFFIX_CREATING
 
-            elif re.match(
-                    '^({})\d+$'.format('|'.join(PROXMOX_VOLUME_TYPES)), key):
+            elif PROXMOX_VOLUME_TYPES_RE.match(key):
                 # Wipe it. We'll add the disks manually later on.
                 pass
 
@@ -980,7 +982,7 @@ class ProxmoxVm(object):
         if 'volumes' not in self._cache:
             volumes = {}
             for key, value in self.get_config().items():
-                if key.startswith(PROXMOX_VOLUME_TYPES):
+                if PROXMOX_VOLUME_TYPES_RE.match(key):
                     location, properties = value.split(',', 1)
                     if location == 'none':
                         volume = ProxmoxVolume(None, properties)
