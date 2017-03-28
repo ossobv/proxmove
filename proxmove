@@ -34,7 +34,6 @@ __version__ = '0.0.9a'
 
 # TODO: see NotImplementedErrors
 # TODO: split up into modules (storage, etc.)
-# TODO: add option to disable ssl validation on the cmdline
 
 log = logging.getLogger('proxmove')
 
@@ -260,10 +259,15 @@ class ProxmoxCluster(object):
         self.name = name
         self.repoid = None
         self.api_url = None
+        self.api_verify_ssl = True
         self._cache = {}
         self._storages = {}
         self._storages_nodespecific = defaultdict(dict)
         self._vms = {}
+
+    def no_verify_ssl(self):
+        "Call to disable SSL verification."
+        self.api_verify_ssl = False
 
     def add_storage(self, name, section):
         try:
@@ -307,7 +311,7 @@ class ProxmoxCluster(object):
                         self.name, self.api_url, e))
             api = ProxmoxAPI(
                 res.hostname, port=res.port, user=res.username,
-                password=res.password, verify_ssl=True)
+                password=res.password, verify_ssl=self.api_verify_ssl)
             self._api = api
         return self._api
 
@@ -1458,6 +1462,9 @@ class CommandLoader(object):
             '--bwlimit', action='store', metavar='MBPS', type=int, help=(
                 'limit bandwidth in Mbit/s'))
         self.parser.add_argument(
+            '--no-verify-ssl', action='store_true', help=(
+                'skip ssl verification on the api hosts'))
+        self.parser.add_argument(
             '--skip-disks', action='store_true', help=(
                 'do the move, but skip copying of the disks; '
                 'implies --skip-start'))
@@ -1508,6 +1515,10 @@ class CommandLoader(object):
                 os.path.expanduser(self.args.config))
         except ValueError as e:
             self.parser.error(e.args[0])
+
+        if self.args.no_verify_ssl:
+            for cluster in self.clusters.values():
+                cluster.no_verify_ssl()
 
     def process(self):
         self.process_clusters()
