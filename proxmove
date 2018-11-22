@@ -95,7 +95,7 @@ class _HumanSizeScan(object):
                 suffix = num_str[i:].strip()
                 break
         return ''.join(num_parts), suffix
-human_size_scan = _HumanSizeScan()
+human_size_scan = _HumanSizeScan()  # noqa
 
 
 def name_from_conf(type_, config):
@@ -639,6 +639,9 @@ class ProxmoxStoragePlain(ProxmoxStorage):
             data = self.ssh_command(
                 ['ls', '-l', path], hide_stderr=True)
         except subprocess.CalledProcessError:
+            log.warning(
+                'Could not get image size from plain storage {!r}'.format(
+                    path))
             return None
 
         exact_size = data.split()[4].decode('ascii', 'replace')
@@ -769,7 +772,10 @@ class ProxmoxStorageZfs(ProxmoxStorage):
              'zfs', 'destroy', temp_snapname], hide_stderr=True)
         parts = data.split()
         if not parts:
-            return None
+            log.warning(
+                'Could not get image size from ZFS snapshot; '
+                'trying disk_size instead')
+            return self.get_disk_size(image_location)
 
         human_size = parts[-1].decode('ascii', 'replace')
         # Add a bit of size since it's a guesstimate. You'd rather not
@@ -829,7 +835,8 @@ class ProxmoxStorageZfs(ProxmoxStorage):
             self.path, src_location, datetime.now().strftime('%y%m%d-%H%M%S'))
         dst_zfs = '{}/{}'.format(dst_storage.path, dst_name)
         log.info('zfs(1) send/recv {} data from {!r} to {!r} (on {})'.format(
-            human_size_fmt(image_size), src_zfs, dst_zfs, dst_storage))
+            (image_size and human_size_fmt(image_size) or '<unknown>'),
+            src_zfs, dst_zfs, dst_storage))
 
         self.ssh_command(['zfs', 'snapshot', src_zfs])
 
