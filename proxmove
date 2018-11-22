@@ -428,7 +428,8 @@ class ProxmoxCluster(object):
         res = [vm for vm in proxmox_vms if vm.get('name') == name]
         if len(res) == 0:
             raise ProxmoxVm.DoesNotExist(
-                'VM named {!r} not found in cluster {!r}'.format(
+                'VM named {!r} not found in cluster {!r}; '
+                'do you have PVEVMAdmin perms?'.format(
                     name, self.name))
         elif len(res) > 1:
             raise ProxmoveError(
