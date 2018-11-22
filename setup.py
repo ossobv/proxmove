@@ -18,8 +18,11 @@ setup(
     name='proxmove',
     version=version,
     scripts=['proxmove'],
-    data_files=[('', [
-        'README.rst', 'CHANGES.rst', 'TODO.rst', 'proxmoverc.sample'])],
+    data_files=[
+        ('share/doc/proxmove', [
+            'README.rst', 'CHANGES.rst', 'TODO.rst']),
+        ('share/proxmove', [
+            'proxmoverc.sample'])],
     description=(
         'Migrate virtual machines between different Proxmox VM clusters'),
     long_description=long_description,

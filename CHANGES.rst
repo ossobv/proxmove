@@ -1,7 +1,13 @@
 Changes
 -------
 
-* **HEAD** - XXXX-XX-XX
+* **0.1.0** - 2018-11-22
+
+  Bugs fixed:
+
+  - Show that not seeing a VM is probably a PVEAdmin-permissions issue.
+  - Don't die if image_size cannot be determined.
+  - Place the sample files and docs in a /usr/share/...proxmove subdir.
 
 * **0.0.9** - 2017-03-28
 
