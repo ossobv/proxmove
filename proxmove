@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 __author__ = 'Walter Doekes'
 __copyright__ = 'Copyright (C) Walter Doekes, OSSO B.V. 2016,2017,2018'
 __licence__ = 'GPLv3+'
-__version__ = '0.1.0'
+__version__ = '0.1.0+dev'
 
 # TODO: see NotImplementedErrors
 # TODO: split up into modules (storage, etc.)

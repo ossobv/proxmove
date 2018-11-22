@@ -1,6 +1,8 @@
 Changes
 -------
 
+* **HEAD** - XXXX-XX-XX
+
 * **0.1.0** - 2018-11-22
 
   Bugs fixed:
