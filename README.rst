@@ -161,6 +161,36 @@ The config file looks better with indentation. The author suggests this layout:
       ...
 
 
+Debugging
+---------
+
+If you run into a ``ResourceException``, you may want to patch proxmoxer 1.0.3
+to show the HTTP error reason as well.
+
+.. code-block:: udiff
+
+    --- proxmoxer/core.py	2019-04-04 09:13:16.832961589 +0200
+    +++ proxmoxer/core.py	2019-04-04 09:15:45.434175030 +0200
+    @@ -75,8 +75,10 @@ class ProxmoxResource(ProxmoxResourceBas
+             logger.debug('Status code: %s, output: %s', resp.status_code, resp.content)
+
+             if resp.status_code >= 400:
+    -            raise ResourceException("{0} {1}: {2}".format(resp.status_code, httplib.responses[resp.status_code],
+    -                                                          resp.content))
+    +            raise ResourceException('{0} {1} ("{2}"): {3}'.format(
+    +                resp.status_code, httplib.responses[resp.status_code],
+    +                resp.reason,  # reason = textual status_code
+    +                resp.content))
+             elif 200 <= resp.status_code <= 299:
+                 return self._store["serializer"].loads(resp)
+
+It might reveal a bug (or new feature), like::
+
+    proxmoxer.core.ResourceException:
+      500 Internal Server Error ("only root can set 'vmgenid' config"):
+      b'{"data":null}'
+
+
 License
 -------
 

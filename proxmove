@@ -23,7 +23,7 @@ import sys
 import time
 from collections import defaultdict
 from datetime import datetime
-from proxmoxer import ProxmoxAPI
+from proxmoxer import ProxmoxAPI, ResourceException
 from http.client import InvalidURL
 from urllib.parse import urlparse
 
@@ -368,7 +368,19 @@ class ProxmoxCluster(object):
 
         # Create new VM.
         api_node = self.api.nodes(nodeid)
-        vmhash = getattr(api_node, type_).create(vmid=vmid, **mutable_config)
+        try:
+            vmhash = getattr(api_node, type_).create(
+                vmid=vmid, **mutable_config)
+        except ResourceException:
+            log.exception(
+                'Failed to create VM with parameters:\n\n'
+                '  # {base_url}\n'
+                '  api.nodes("{node}/{type}")'
+                '.create(vmid={vmid!r}, **{config})\n\n'
+                .format(
+                    base_url=self.api._backend.base_url,
+                    node=nodeid, type=type_, vmid=vmid, config=mutable_config))
+            raise
 
         # Wait a while to ensure that we get the VM.
         log.info(
