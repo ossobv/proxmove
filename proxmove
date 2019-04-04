@@ -334,6 +334,11 @@ class ProxmoxCluster(object):
                 # Wipe it. We'll add the disks manually later on.
                 pass
 
+            elif key == 'vmgenid':
+                # Let proxmox generate this id. Otherwise we may get a "only
+                # root can set 'vmgenid' config".
+                pass
+
             else:
                 mutable_config[key] = value
 
