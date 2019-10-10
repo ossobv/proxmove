@@ -93,6 +93,10 @@ clusters you have. For example *banana-cluster* and *the-new-cluster*.
 
     ; Example cluster named "banana-cluster" with 3 storage devices, one
     ; shared, and two which exist on a single node only.
+    ;
+    ; The user requires various permissions found in the PVEVMAdmin role (VM
+    ; allocate + audit) and PVEAuditor role (Datastore audit).
+    ;
     [pve:banana-cluster]
     api=https://user@pve:PASSWORD@banana-cluster.com:443
 
