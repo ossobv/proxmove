@@ -28,7 +28,7 @@ from http.client import InvalidURL
 from urllib.parse import urlparse
 
 __author__ = 'Walter Doekes'
-__copyright__ = 'Copyright (C) Walter Doekes, OSSO B.V. 2016,2017,2018'
+__copyright__ = 'Copyright (C) Walter Doekes, OSSO B.V. 2016-2020'
 __licence__ = 'GPLv3+'
 __version__ = '0.1.0+dev'
 
@@ -49,6 +49,19 @@ SUFFIX_MIGRATED = '--MIGRATED'  # source, when done
 PROXMOX_VOLUME_TYPES = ('ide', 'sata', 'scsi', 'virtio')
 PROXMOX_VOLUME_TYPES_RE = re.compile(  # "scsi0", but not "scsihw"
     r'^({})\d+$'.format('|'.join(PROXMOX_VOLUME_TYPES)))
+
+
+def argv2str(argv):
+    def esc(word):
+        if all(i in (
+                'ABCDEFGHIJKLMNOPQRSTUVWXYz'
+                'abcdefghijklmnopqrstuvwxyz'
+                '0123456789_-:.,/@') for i in word):
+            return word
+        return "'{}'".format(
+            word.replace('\\', '\\\\').replace("'", "\\'"))
+
+    return ' '.join(esc(i) for i in argv)
 
 
 def human_size_fmt(num, suffix='B'):
@@ -283,9 +296,11 @@ class ProxmoxCluster(object):
     def get_nodes(self):
         if 'nodes' not in self._cache:
             tmp = self.api.nodes.get()
+            log.debug('(api) %r nodes: %s', self.name, tmp)
             nodes = [
                 node['node'] for node in tmp
-                if node.get('uptime') and node['type'] == 'node']
+                if node.get('status') == 'online' and node['type'] == 'node']
+            nodes.sort()
             self._cache['nodes'] = nodes
         return self._cache['nodes']
 
@@ -412,6 +427,10 @@ class ProxmoxCluster(object):
         if 'cluster.resources.type=vm' not in self._cache:
             self._cache['cluster.resources.type=vm'] = (
                 self.api.cluster.resources.get(type='vm'))
+            # log.debug(
+            #     '(api) %r vms: %s', self.name, sorted(
+            #         i['name']
+            #         for i in self._cache['cluster.resources.type=vm']))
         return self._cache['cluster.resources.type=vm']
 
     def get_free_vmid(self):
@@ -514,14 +533,14 @@ class ProxmoxStorage(object):
                 'section'.format(self.name))
 
     def check_prerequisite_commands(self):
-        raise NotImplementedError('subclasses need to implemented this')
+        raise NotImplementedError('subclasses need to implement this')
 
     def check_prerequisite_paths(self):
         try:
             self.ssh_command(['test', '-d', self.temp])
         except subprocess.CalledProcessError:
             raise PrepareError(
-                'temp dir {!r} of storage {!r} does not exist; '
+                'temp dir {!r} on storage {!r} does not exist; '
                 'please create it!'.format(self.temp, self.name))
 
     def copy(self, image_size, disk_size, src_location, src_format,
@@ -550,6 +569,8 @@ class ProxmoxStorage(object):
         raise NotImplementedError('subclasses need to implemented this')
 
     def run_command(self, command, hide_stderr=False, tty=False):
+        log.debug('(exec) %s', argv2str(command))
+
         kwargs = {}
         if tty:
             kwargs['stdin'] = sys.stdin
@@ -572,17 +593,36 @@ class ProxmoxStorage(object):
             return subprocess.check_output(command, **kwargs)
 
     def has_commands(self, commands):
+        fail = False
         try:
-            result = self.ssh_command(['which'] + commands, hide_stderr=True)
-        except subprocess.CalledProcessError:
-            return False
+            result = self.ssh_command(['which'] + commands)
+        except subprocess.CalledProcessError as e:
+            fail = True
+            result = e.output
+
         result = result.decode('ascii', 'replace').strip()
         found = set([i.rsplit('/', 1)[-1] for i in result.split('\n')])
         expected = set(commands)
+        missing = (expected - found)
+        if missing:
+            log.debug('Missing commands: %r', missing)
+            return False
+        if fail:
+            return False
+        # (double check against excess values..)
         assert not (found - expected), (expected, found)
-        return not (expected - found)  # should have them all
+        return True
 
     def ssh_command(self, command, hide_stderr=False, tty=False):
+        if not hasattr(self, '_is_ssh_checked'):
+            try:
+                self.run_command(['ssh', '-A', self.ssh, '/bin/true'])
+            except subprocess.CalledProcessError:
+                raise PrepareError(
+                    'failed to ssh with -A to {!r} for storage {!r}'.format(
+                        self.ssh, self.name))
+            self._is_ssh_checked = True
+
         extra = []
         if tty:
             extra.append('-t')
@@ -712,8 +752,8 @@ class ProxmoxStoragePlain(ProxmoxStorage):
     def check_prerequisite_commands(self):
         if not self.has_commands(['ssh', 'scp']):
             raise PrepareError(
-                'storage {!r} lacks ssh(1) or scp(1)'.format(
-                    self.name), file=sys.stderr)
+                'missing required binaries ssh and/or scp on storage {!r}; '
+                'please install them'.format(self.name))
 
     def copy_to_temp(self, src_location, dst_storage, dst_name):
         src_path = os.path.join(self.path, src_location)
@@ -778,14 +818,14 @@ class ProxmoxStorageZfs(ProxmoxStorage):
     def check_prerequisite_commands(self):
         if not self.has_commands(['ssh', 'zfs', 'mbuffer']):
             raise PrepareError(
-                'storage {!r} lacks ssh(1), zfs(1) or mbuffer(1)'.format(
-                    self.name))
+                'missing required binaries ssh and/or zfs and/or mbuffer '
+                'on storage {!r}; please install them'.format(self.name))
 
     def get_image_size(self, image_location):
         temp_snapname = '{}/{}@temp-{}'.format(
             self.path, image_location, random.random())
         data = self.ssh_command(
-            ['zfs', 'snapshot', temp_snapname, ';'
+            ['zfs', 'snapshot', temp_snapname, ';',
              'zfs', 'send', '-Rnv', temp_snapname, ';',
              'zfs', 'destroy', temp_snapname], hide_stderr=True)
         parts = data.split()
@@ -866,12 +906,14 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         # pv shows a nice progress bar. It's optional.
         optional_pv_pipe = ''
         if dst_storage.has_commands(['pv']):
-            log.debug(
-                "Using pv(1) for progress bar because it's available")
             optional_pv_pipe = (
                 # --fineta does not exist on all versions..
                 # --force is required to make it display anything..
                 'pv --force --eta --progress -s {} | '.format(image_size))
+        else:
+            log.warn(
+                'pv(1) command is not found on the destination storage; '
+                'consider installing it to get a pretty progress bar')
 
         # Older mbuffer(1) [v20140310-3] on the receiving end
         # may say: "mbuffer: warning: No controlling terminal
@@ -1591,8 +1633,9 @@ class CommandLoader(object):
     def process_nodes(self):
         if self.args.nodeid not in self.args.destination.get_nodes():
             self.parser.error(
-                'destination node {!r} not found in cluster'.format(
-                    self.args.nodeid))
+                'destination node {!r} not online (got: {})'.format(
+                    self.args.nodeid,
+                    repr(self.args.destination.get_nodes())[1:-1]))
 
         try:
             self.args.storage = self.args.destination.get_storage(
@@ -1631,7 +1674,7 @@ def main():
     try:
         vmmover.prepare()
     except PrepareError as e:
-        print('error: {}'.format(e), file=sys.stderr)
+        log.error('%s', e)
         print('aborting', file=sys.stderr)
         sys.exit(1)
     else:
