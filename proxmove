@@ -199,6 +199,12 @@ class ArgumentParser14191(argparse.ArgumentParser):
         return ns
 
 
+class CalledProcessError2(subprocess.CalledProcessError):
+    def __str__(self):
+        return '{}\n\n(output)\n{}'.format(
+            super().__str__(), self.output.decode('ascii', 'replace'))
+
+
 class ProxmoxClusters(dict):
     @classmethod
     def from_filename(cls, filename):
@@ -575,9 +581,10 @@ class ProxmoxStorage(object):
         if tty:
             kwargs['stdin'] = sys.stdin
             kwargs['stdout'] = sys.stdout
-            kwargs['stderr'] = sys.stderr
-        if hide_stderr:
-            kwargs['stderr'] = subprocess.DEVNULL
+            if hide_stderr:
+                kwargs['stderr'] = subprocess.DEVNULL
+            else:
+                kwargs['stderr'] = sys.stderr
 
         if tty:
             # We don't need to catch KeyboardInterrupt and SystemExit
@@ -585,12 +592,21 @@ class ProxmoxStorage(object):
             proc = subprocess.Popen(command, **kwargs)
             status = proc.wait()
             if status != 0:
-                raise subprocess.CalledProcessError(
+                raise CalledProcessError2(
                     returncode=status, cmd=command,
                     output='Failure with status {}'.format(status))
             return ''
-        else:
-            return subprocess.check_output(command, **kwargs)
+
+        if hide_stderr:
+            kwargs['stderr'] = subprocess.PIPE
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, **kwargs)
+        (out, err) = proc.communicate()
+        if proc.returncode != 0:
+            if err:
+                out = out + b'\n\n(stderr)\n' + err
+            raise CalledProcessError2(
+                returncode=proc.returncode, cmd=command, output=out)
+        return out
 
     def has_commands(self, commands):
         fail = False
@@ -825,8 +841,8 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         temp_snapname = '{}/{}@temp-{}'.format(
             self.path, image_location, random.random())
         data = self.ssh_command(
-            ['zfs', 'snapshot', temp_snapname, ';',
-             'zfs', 'send', '-Rnv', temp_snapname, ';',
+            ['zfs', 'snapshot', temp_snapname, '&&',
+             'zfs', 'send', '-Rnv', temp_snapname, '&&',
              'zfs', 'destroy', temp_snapname], hide_stderr=True)
         parts = data.split()
         if not parts:
