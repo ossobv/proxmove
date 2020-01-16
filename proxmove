@@ -153,8 +153,9 @@ class ArgumentParser14191(argparse.ArgumentParser):
     class ErrorParser(argparse.ArgumentParser):
         def __init__(self, *args, **kwargs):
             self.__errorobj = None
+            kwargs['add_help'] = False
             super(ArgumentParser14191.ErrorParser, self).__init__(
-                *args, add_help=False, **kwargs)
+                *args, **kwargs)
 
         def error(self, message):
             if self.__errorobj:
@@ -477,7 +478,7 @@ class ProxmoxStorage(object):
         for model in (ProxmoxStoragePlain, ProxmoxStorageZfs):
             try:
                 storage = model.from_section(name, section)
-            except PrepareError as e:
+            except PrepareError:
                 pass
             else:
                 storages.append(storage)
@@ -1451,7 +1452,9 @@ class CommandLoader(object):
 
     def argparse(self):
         self.argparse_create()
-        self.argparse_add_options()
+        self.argparse_add_optional()
+        self.argparse_add_debug()
+        self.argparse_add_other()
         self.argparse_add_arguments()
         self.argparse_run()
 
@@ -1465,6 +1468,7 @@ class CommandLoader(object):
         # - move SRC DST DSTNODE VM..
         # - dumpconfig (based with the storage devices..)
         self.parser = ArgumentParser14191(
+            add_help=False,  # we'll be adding it to a separate group
             description=(
                 'Migrate VMs from one Proxmox cluster to another.'),
             epilog=(
@@ -1475,39 +1479,48 @@ class CommandLoader(object):
                 '[storage:CLUSTER_ALIAS:STORAGE_NAME] sections with "ssh", '
                 '"path" and "temp" settings.'))
 
-    def argparse_add_options(self):
-        self.parser.add_argument(
+    def argparse_add_optional(self):
+        grp = self.parser.add_argument_group('optional arguments')
+        grp.add_argument(
             '-c', '--config', action='store', metavar='FILENAME',
             default='~/.proxmoverc', help=(
                 'use alternate configuration inifile'))
-        self.parser.add_argument(
+        grp.add_argument(
             '-n', '--dry-run', action='store_true', help=(
                 'stop before doing any writes'))
-        self.parser.add_argument(
+        grp.add_argument(
             '--bwlimit', action='store', metavar='MBPS', type=int, help=(
                 'limit bandwidth in Mbit/s'))
-        self.parser.add_argument(
+        grp.add_argument(
             '--no-verify-ssl', action='store_true', help=(
                 'skip ssl verification on the api hosts'))
-        self.parser.add_argument(
+        grp.add_argument(
             '--skip-disks', action='store_true', help=(
                 'do the move, but skip copying of the disks; '
                 'implies --skip-start'))
-        self.parser.add_argument(
+        grp.add_argument(
             '--skip-start', action='store_true', help=(
                 'do the move, but do not start the new instance'))
-        self.parser.add_argument(
-            '--version', action='version', version=(
-                'proxmove {}'.format(__version__)))
 
-        # Debugging options. Not needed in full view at the moment.
-        self.parser.add_argument(
-            # Enables debug log.
-            '--debug', action='store_true', help=argparse.SUPPRESS)
-        self.parser.add_argument(
+    def argparse_add_debug(self):
+        grp = self.parser.add_argument_group('debug arguments')
+        grp.add_argument(
+            '--debug', action='store_true', help=(
+                'enables extra debug logging'))
+        grp.add_argument(
             # Ignores the fact that a VM exists already. Can be used to test
             # moves between the same platform.
-            '--ignore-exists', action='store_true', help=argparse.SUPPRESS)
+            '--ignore-exists', action='store_true', help=(
+                'continue, even though the VM name exists on the target'))
+
+    def argparse_add_other(self):
+        grp = self.parser.add_argument_group('other actions')
+        grp.add_argument(
+            '-h', '--help', action='help', help=(
+                'show this help message and exit'))
+        grp.add_argument(
+            '--version', action='version', version=(
+                'proxmove {}'.format(__version__)))
 
     def argparse_add_arguments(self):
         self.parser.add_argument(

@@ -11,8 +11,9 @@ proxmove helps you move VMs between PVE-clusters with minimal hassle.
 
 .. code-block:: console
 
-    usage: proxmove [-h] [-c FILENAME] [-n] [--bwlimit MBPS] [--skip-disks]
-                    [--skip-start] [--version]
+    usage: proxmove [-c FILENAME] [-n] [--bwlimit MBPS] [--no-verify-ssl]
+                    [--skip-disks] [--skip-start] [--debug] [--ignore-exists] [-h]
+                    [--version]
                     source destination nodeid storage vm [vm ...]
 
     Migrate VMs from one Proxmox cluster to another.
@@ -25,14 +26,21 @@ proxmove helps you move VMs between PVE-clusters with minimal hassle.
       vm                    one or more VMs (guests) to move
 
     optional arguments:
-      -h, --help            show this help message and exit
       -c FILENAME, --config FILENAME
                             use alternate configuration inifile
       -n, --dry-run         stop before doing any writes
       --bwlimit MBPS        limit bandwidth in Mbit/s
+      --no-verify-ssl       skip ssl verification on the api hosts
       --skip-disks          do the move, but skip copying of the disks; implies
                             --skip-start
       --skip-start          do the move, but do not start the new instance
+
+    debug arguments:
+      --debug               enables extra debug logging
+      --ignore-exists       continue, even though the VM name exists on the target
+
+    other actions:
+      -h, --help            show this help message and exit
       --version             show program's version number and exit
 
     Cluster aliases and storage locations should be defined in ~/.proxmoverc (or
