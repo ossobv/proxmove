@@ -324,6 +324,14 @@ class ProxmoxCluster(object):
 
     @property
     def api(self):
+        if hasattr(self, '_api'):
+            # Use manual timer, because proxmoxer times out and doesn't
+            # re-auth after getting a 401.
+            # See https://github.com/swayf/proxmoxer/issues/26
+            api_age = (time.time() - self._api_start)
+            if api_age > (30 * 60):
+                del self._api
+
         if not hasattr(self, '_api'):
             try:
                 res = urlparse(self.api_url)
@@ -331,10 +339,13 @@ class ProxmoxCluster(object):
                 raise ValueError(
                     'splitting {!r} api {!r} URL failed: {}'.format(
                         self.name, self.api_url, e))
+            log.debug('(api) Connecting to %s', res.hostname)
             api = ProxmoxAPI(
                 res.hostname, port=res.port, user=res.username,
                 password=res.password, verify_ssl=self.api_verify_ssl)
             self._api = api
+            self._api_start = time.time()
+
         return self._api
 
     def create_vm(self, type_, config, nodeid):
