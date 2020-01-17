@@ -1,7 +1,15 @@
 Changes
 -------
 
-* **HEAD** - XXXX-XX-XX
+* **1.0** - 2020-01-17
+
+  Features/fixes:
+
+  - Fix disk I/O resource hog overuse on newer PVE clusters.
+  - Fix API connection to newer PVE clusters.
+  - Add faster ssh cipher by default.
+  - Work around Proxmox API timeout.
+  - Improved usability through better logging and prepare checks.
 
 * **0.1.0** - 2018-11-22
 
