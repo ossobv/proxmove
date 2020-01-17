@@ -12,8 +12,8 @@ proxmove helps you move VMs between PVE-clusters with minimal hassle.
 .. code-block:: console
 
     usage: proxmove [-c FILENAME] [-n] [--bwlimit MBPS] [--no-verify-ssl]
-                    [--skip-disks] [--skip-start] [--debug] [--ignore-exists] [-h]
-                    [--version]
+                    [--skip-disks] [--skip-start] [--ssh-ciphers CIPHERS]
+                    [--debug] [--ignore-exists] [-h] [--version]
                     source destination nodeid storage vm [vm ...]
 
     Migrate VMs from one Proxmox cluster to another.
@@ -34,6 +34,10 @@ proxmove helps you move VMs between PVE-clusters with minimal hassle.
       --skip-disks          do the move, but skip copying of the disks; implies
                             --skip-start
       --skip-start          do the move, but do not start the new instance
+      --ssh-ciphers CIPHERS
+                            comma separated list of ssh -c ciphers to prefer,
+                            (aes128-gcm@openssh.com is supposed to be fast if you
+                            have aes on your cpu); set to "-" to use ssh defaults
 
     debug arguments:
       --debug               enables extra debug logging

@@ -289,6 +289,16 @@ class ProxmoxCluster(object):
         "Call to disable SSL verification."
         self.api_verify_ssl = False
 
+    def set_bandwidth_limit(self, bandwidth_limit):
+        # assume that no storages will be added after calling this
+        for storage in self._storages.values():
+            storage.set_bandwidth_limit(bandwidth_limit)
+
+    def set_ssh_ciphers(self, ssh_ciphers):
+        # assume that no storages will be added after calling this
+        for storage in self._storages.values():
+            storage.set_ssh_ciphers(ssh_ciphers)
+
     def add_storage(self, name, section):
         try:
             name, node = name.split('@', 1)
@@ -538,7 +548,8 @@ class ProxmoxStorage(object):
         self.temp = None
 
         # Set through command line.
-        self.bwlimit = None
+        self.bwlimit_mbps = None
+        self.ssh_ciphers = None
 
     def check_prerequisites(self):
         self.check_prerequisite_config()
@@ -644,25 +655,34 @@ class ProxmoxStorage(object):
 
     def ssh_command(self, command, hide_stderr=False, tty=False):
         if not hasattr(self, '_is_ssh_checked'):
+            # We could auto-add host key using StrictHostKeyChecking=no,
+            # but I'm not sure we want to.
+            ssh_command = ['ssh', '-A']
+            if self.ssh_ciphers not in (None, '', 'default', 'defaults'):
+                ssh_command.extend(['-c', self.ssh_ciphers])
+            ssh_command.append(self.ssh)
+            full_command = ssh_command + ['/bin/true']
             try:
-                self.run_command(['ssh', '-A', self.ssh, '/bin/true'])
+                self.run_command(full_command)
             except subprocess.CalledProcessError:
                 raise PrepareError(
-                    'failed to ssh with -A to {!r} for storage {!r}'.format(
-                        self.ssh, self.name))
+                    'failed to ssh to {!r} for storage {!r}: {}'.format(
+                        self.ssh, self.name, argv2str(full_command)))
             self._is_ssh_checked = True
+            self._ssh_command = ssh_command
 
         extra = []
         if tty:
             extra.append('-t')
         return self.run_command(
-            # We could auto-add host key using StrictHostKeyChecking=no,
-            # but I'm not sure we want to.
-            ['ssh', '-A',  # '-o', 'StrictHostKeyChecking=no',
-             self.ssh] + extra + command, hide_stderr=hide_stderr, tty=tty)
+            self._ssh_command + extra + command,
+            hide_stderr=hide_stderr, tty=tty)
 
-    def set_bandwidth_limit(self, bwlimit):
-        self.bwlimit_mbps = bwlimit
+    def set_bandwidth_limit(self, bandwidth_limit):
+        self.bwlimit_mbps = bandwidth_limit
+
+    def set_ssh_ciphers(self, ssh_ciphers):
+        self.ssh_ciphers = ssh_ciphers
 
     def get_volume(self, location, properties):
         return ProxmoxVolume(location, properties, storage=self)
@@ -1310,7 +1330,6 @@ class VmMover(object):
         self.dst_pve = options.destination
         self.dst_node = options.nodeid
         self.dst_storage = options.storage
-        self.bw_limit = options.bwlimit
         self.vms_requested = options.vm
 
         self.ignore_exists = options.ignore_exists
@@ -1327,7 +1346,6 @@ class VmMover(object):
         self.prepare_vm_config()
         self.prepare_storage_list()
         self.prepare_storage_prerequisites()
-        self.prepare_storage_settings()
 
     def prepare_vm_list(self):
         log.debug('Checking VMs existence on source and destination')
@@ -1367,7 +1385,7 @@ class VmMover(object):
                             vm_name_with_suffix))
 
     def prepare_vm_config(self):
-        log.debug('Checking for troublesome config in {} VMs to move'.format(
+        log.debug('Checking for problematic config in {} VMs to move'.format(
             len(self.vms_to_move)))
 
         for vm in self.vms_to_move:
@@ -1407,11 +1425,6 @@ class VmMover(object):
         log.debug('Checking storage prerequisites')
         for storage in self.storages:
             storage.check_prerequisites()
-
-    def prepare_storage_settings(self):
-        log.debug('Set bandwidth limit on storage objects')
-        for storage in self.storages:
-            storage.set_bandwidth_limit(self.bw_limit)
 
     def run(self, dry_run):
         translator = DefaultConfigTranslator()
@@ -1578,6 +1591,12 @@ class CommandLoader(object):
         grp.add_argument(
             '--skip-start', action='store_true', help=(
                 'do the move, but do not start the new instance'))
+        grp.add_argument(
+            '--ssh-ciphers', action='store', metavar='CIPHERS',
+            default='aes128-gcm@openssh.com,aes128-cbc', help=(
+                'comma separated list of ssh -c ciphers to prefer, '
+                '(aes128-gcm@openssh.com is supposed to be fast if you have '
+                'aes on your cpu); set to "-" to use ssh defaults'))
 
     def argparse_add_debug(self):
         grp = self.parser.add_argument_group('debug arguments')
@@ -1631,9 +1650,13 @@ class CommandLoader(object):
         except ValueError as e:
             self.parser.error(e.args[0])
 
-        if self.args.no_verify_ssl:
-            for cluster in self.clusters.values():
+        for cluster in self.clusters.values():
+            if self.args.no_verify_ssl:
                 cluster.no_verify_ssl()
+            if self.args.bwlimit:
+                cluster.set_bandwidth_limit(self.args.bwlimit)
+            if self.args.ssh_ciphers:
+                cluster.set_ssh_ciphers(self.args.ssh_ciphers)
 
     def process(self):
         self.process_clusters()
