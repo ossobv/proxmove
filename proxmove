@@ -928,13 +928,18 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         self.ssh_command(
             # -n = no create volume
             # -p = progress
-            # -t unsafe = cache=unsafe
-            #   When converting, we don't want any disk syncing. For speed,
-            #   writeback should be faster than writethrough. For IO intensity
-            #   writeback is heavier than writethrough. Use 'unsafe' (as faster
-            #   alternative to 'none', to get it done with the most speed and
-            #   the least IO.
-            ['qemu-img', 'convert', '-n', '-p', '-t', 'unsafe',
+            # -t none = cache=none
+            #   qemu-img provides various cache options:
+            #   - writethrough = default, O_DSYNC (safest, slowest)
+            #   - writeback = new default, syncing to host [fast, resource hog]
+            #   - none = sync to host, O_DIRECT (bypass host page cache)
+            #   - unsafe = write to host, ignore all sync [fast, resource hog]
+            #   We would like 'unsafe' to get the best performance.
+            #   Unfortunately this appears to block the target system I/O too
+            #   much, causing I/O load spikes on other users of the system.
+            #   Using 'none' does not have this effect instead, at the expense
+            #   of a slower import (conversion).
+            ['qemu-img', 'convert', '-n', '-p', '-t', 'none',
              '-f', src_format, '-O', 'raw', src_temp, dst_path], tty=True)
         log.info('Removing temp {!r} (on {})'.format(dst_path, self))
         self.ssh_command(['rm', src_temp])
