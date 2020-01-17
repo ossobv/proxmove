@@ -326,7 +326,9 @@ class ProxmoxCluster(object):
     def api(self):
         if hasattr(self, '_api'):
             # Use manual timer, because proxmoxer times out and doesn't
-            # re-auth after getting a 401.
+            # re-auth after getting a 401. Of course this is a workaround,
+            # it would've been better to handle the 401 and re-auth. If the
+            # session is lost or has a lower timeout, we'd still fail.
             # See https://github.com/swayf/proxmoxer/issues/26
             api_age = (time.time() - self._api_start)
             if api_age > (30 * 60):
