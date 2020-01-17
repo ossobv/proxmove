@@ -1,6 +1,8 @@
 Changes
 -------
 
++* **HEAD** - XXXX-XX-XX
+
 * **1.0** - 2020-01-17
 
   Features/fixes:
