@@ -1,7 +1,7 @@
-proxmove :: Proxmox VM migrator
-===============================
+|proxmove|
+==========
 
-*Migrate VMs between different Proxmox VE clusters.*
+*The Proxmox VM migrator: migrates VMs between different Proxmox VE clusters.*
 
 Migrating a virtual machine (VM) on a PVE-cluster from one node to
 another is implemented in the Proxmox Virtual Environment (PVE). But
@@ -213,3 +213,7 @@ License
 proxmove is free software: you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free
 Software Foundation, version 3 or any later version.
+
+
+.. |proxmove| image:: assets/proxmove_head.png
+    :alt: proxmove
