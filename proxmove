@@ -137,6 +137,13 @@ class PrepareError(ProxmoveError):
     pass
 
 
+class ResumablePrepareError(PrepareError):
+    """
+    Failure during preparation. This is resumable if the user wishes so.
+    """
+    pass
+
+
 class ArgumentParser14191(argparse.ArgumentParser):
     """ArgumentParser from argparse that handles out-of-order positional
     arguments.
@@ -487,11 +494,12 @@ class ProxmoxCluster(object):
         nodes = self.get_nodes()
         return random.choice(nodes)
 
-    def get_vm(self, name):
+    def get_vm(self, name, suffix=''):
         if name in self._vms:
             return self._vms[name]
         proxmox_vms = self.get_vms_dict()
-        res = [vm for vm in proxmox_vms if vm.get('name') == name]
+        name_with_suffix = name + suffix
+        res = [vm for vm in proxmox_vms if vm.get('name') == name_with_suffix]
         if len(res) == 0:
             raise ProxmoxVm.DoesNotExist(
                 'VM named {!r} not found in cluster {!r}; '
@@ -502,7 +510,7 @@ class ProxmoxCluster(object):
                 'VM named {!r} found multiple times in cluster {!r}'.format(
                     name, self.name))
         vm = self._vms[name] = ProxmoxVm.from_dict(
-            res[0], api=self.api, cluster=self)
+            name, res[0], api=self.api, cluster=self)
         return vm
 
     def ping(self):
@@ -575,6 +583,11 @@ class ProxmoxStorage(object):
 
     def copy(self, image_size, disk_size, src_location, src_format,
              dst_storage, dst_id, dst_name):
+        new_path, new_format = dst_storage.copy_already_done(
+            dst_name, disk_size, image_size)
+        if new_path:
+            return new_path, new_format
+
         dst_temp = self.copy_to_temp(src_location, dst_storage, dst_name)
 
         if dst_temp:
@@ -587,6 +600,9 @@ class ProxmoxStorage(object):
                 image_size, src_location, dst_storage, dst_name)
 
         return new_path, new_format
+
+    def copy_already_done(self, dst_name, disk_size, image_size):
+        raise NotImplementedError('subclasses need to implemented this')
 
     def copy_to_temp(self, src_location, dst_storage, dst_name):
         raise NotImplementedError('subclasses need to implemented this')
@@ -813,6 +829,10 @@ class ProxmoxStoragePlain(ProxmoxStorage):
                 'missing required binaries ssh and/or scp on storage {!r}; '
                 'please install them'.format(self.name))
 
+    def copy_already_done(self, dst_name, disk_size, image_size):
+        log.warning('FIXME: Non-zfs resume not implemented yet')  # XXX
+        return None, None
+
     def copy_to_temp(self, src_location, dst_storage, dst_name):
         if ':' in dst_storage.ssh:
             user_host, port = dst_storage.ssh.split(':', 1)
@@ -827,6 +847,10 @@ class ProxmoxStoragePlain(ProxmoxStorage):
 
         # mkdir
         dst_storage.ssh_command(['mkdir', '-p', os.path.dirname(dst_temp)])
+        # check pre-existence of temp file.. if it existed, we should either
+        # abort OR offer resume (FIXME)
+        dst_storage.ssh_command(['test', '!', '-f', dst_temp])
+
         # scp, using ssh+scp instead of local-scp, so we can add our
         # beloved options.
         scp_command = ['scp', '-o', 'StrictHostKeyChecking=no']
@@ -915,6 +939,17 @@ class ProxmoxStorageZfs(ProxmoxStorage):
 
         return int(human_size_scan(number))  # hope this is accurate
 
+    def copy_already_done(self, dst_name, disk_size, image_size):
+        try:
+            found_size = self.get_disk_size(dst_name)
+        except CalledProcessError2:
+            # Does not exist. All good. We'll copy it.
+            return None, None
+        if disk_size == found_size:
+            return dst_name, None
+        return ProxmoveError('Volume {!r} exists.. this is bad'.format(
+            dst_name))
+
     def copy_to_temp(self, src_location, dst_storage, dst_name):
         if isinstance(dst_storage, ProxmoxStorageZfs):
             # ZFS->ZFS copying requires no temp files.
@@ -987,7 +1022,7 @@ class ProxmoxStorageZfs(ProxmoxStorage):
                 # --force is required to make it display anything..
                 'pv --force --eta --progress -s {} | '.format(image_size))
         else:
-            log.warn(
+            log.warning(
                 'pv(1) command is not found on the destination storage; '
                 'consider installing it to get a pretty progress bar')
 
@@ -1032,9 +1067,9 @@ class ProxmoxVm(object):
         pass
 
     @classmethod
-    def from_dict(cls, dict_, api, cluster):
+    def from_dict(cls, name, dict_, api, cluster):
         vm = cls(
-            dict_['name'], dict_['node'], dict_['type'], dict_['vmid'],
+            name, dict_['name'], dict_['node'], dict_['type'], dict_['vmid'],
             dict_['status'], api, cluster)
 
         # LXC(FIXME): When creating an LXC container, the get_config()
@@ -1054,7 +1089,8 @@ class ProxmoxVm(object):
 
         return vm
 
-    def __init__(self, name, node, type_, id_, status, api, cluster):
+    def __init__(self, basename, name, node, type_, id_, status, api, cluster):
+        self.basename = basename  # without "--CREATING" or similar suffix
         self.name = name
         self.node = node
         self.type = type_  # qemu|lxc|...
@@ -1305,7 +1341,7 @@ class ProxmoxVolume(object):
         # irrelevant. (pv(1) gets a guesstimate which may be off by a
         # few percent. We don't want the user to think the transfer
         # stopped at 98%.)
-        log.info('Volume transferring/conversion 100% complete!')
+        log.info('Volume transferring/conversion 100% (is/was) complete!')
         return ProxmoxVolume(
             new_path, self.get_properties(format=new_format),
             storage=new_storage)
@@ -1372,9 +1408,24 @@ class VmMover(object):
         log.debug('Checking VMs existence on source and destination')
         vms = []
         for vm_name in self.vms_requested:
-            self.prepare_vm_check_source(vm_name)
-            self.prepare_vm_check_destination(vm_name)
-            vm = self.src_pve.get_vm(vm_name)
+            src_suffix = ''
+            try:
+                self.prepare_vm_check_source(vm_name)
+            except ResumablePrepareError as err1:
+                log.warning(err1)
+                try:
+                    self.prepare_vm_check_destination(vm_name)
+                except ResumablePrepareError as err2:
+                    log.warning(err2)
+                    resume_work = input('Continue [y/N]? ')
+                    if resume_work.strip().lower() != 'y':
+                        raise
+                    src_suffix = SUFFIX_CLONING
+                else:
+                    raise  # err1
+            else:
+                self.prepare_vm_check_destination(vm_name)
+            vm = self.src_pve.get_vm(vm_name, suffix=src_suffix)
             vms.append(vm)
 
         self.vms_to_move = vms
@@ -1388,9 +1439,11 @@ class VmMover(object):
             except ProxmoxVm.DoesNotExist:
                 pass
             else:
-                raise PrepareError(
-                    'VM {!r} exists on source already'.format(
-                        vm_name_with_suffix))
+                err = 'VM {!r} exists on source already'.format(
+                    vm_name_with_suffix)
+                if suffix == SUFFIX_CLONING:
+                    raise ResumablePrepareError(err)
+                raise PrepareError(err)
 
     def prepare_vm_check_destination(self, vm_name):
         for suffix in ('', SUFFIX_CREATING):
@@ -1400,10 +1453,12 @@ class VmMover(object):
             except ProxmoxVm.DoesNotExist:
                 pass
             else:
-                if not (self.ignore_exists and not suffix):
-                    raise PrepareError(
-                        'VM {!r} exists on destination already'.format(
-                            vm_name_with_suffix))
+                err = 'VM {!r} exists on destination already'.format(
+                    vm_name_with_suffix)
+                if suffix == SUFFIX_CREATING:
+                    raise ResumablePrepareError(err)
+                if not self.ignore_exists:
+                    raise PrepareError(err)
 
     def prepare_vm_config(self):
         log.debug('Checking for problematic config in {} VMs to move'.format(
@@ -1490,69 +1545,88 @@ class VmMover(object):
                 volume.get_human_size('guest')))
 
         if not dry_run:
-            # Translate config, create new VM.
-            src_vm_name = src_vm.name
+            dst_vm, is_resuming = self._start_moving_vm(src_vm, translator)
+            self._move_vm_volumes(src_vm, dst_vm, is_resuming)
+            self._finish_moving_vm(src_vm, dst_vm)
+
+    def _start_moving_vm(self, src_vm, translator):
+        if src_vm.name == src_vm.basename:
+            # Pristine VMs: start, by translating config and
+            # creating a new VM.
             dst_config = translator.config(src_vm.get_config())
             dst_vm = self.dst_pve.create_vm(
                 src_vm.type, dst_config, nodeid=self.dst_node)
 
-            # Stop old VM, create storage, copy storage.
+            # Stop old VM and rename.
             src_vm.ensure_stopped()
-            src_vm.rename(src_vm_name + SUFFIX_CLONING)
+            src_vm.rename(src_vm.basename + SUFFIX_CLONING)
+            is_resuming = False
+        else:
+            # Okay. When name!=basename we're already started.
+            assert src_vm.name == src_vm.basename + SUFFIX_CLONING, src_vm
+            dst_vm = self.dst_pve.get_vm(
+                src_vm.basename, suffix=SUFFIX_CREATING)
+            is_resuming = True
 
-            # LXC(FIXME): Here we should migrate/copy the ROOTFS data
-            # for LXC too. Example old config: {
-            #  'rootfs': 'pool0-pve2-ssd:subvol-105-disk-1,size=20G',
-            #  'searchdomain': '91.xxx.xxx.xx', 'cpuunits': 1024,
-            #  'cpulimit': '2', 'swap': 0, 'hostname': 'osso-xxxxxxxxxxxxxx',
-            #  'net1': 'bridge=vmbr535,hwaddr=32:xx:xx:xx:xx:xx,'
-            #      'ip=10.xx.xx.xx/24,name=eth1,type=veth',
-            #  'memory': 2048, 'net0': 'bridge=vmbr0,gw=10.xxx.x.x,'
-            #      'hwaddr=66:xx:xx:xx:xx:xx,ip=10.xxx.x.xx/24,'
-            #      'name=eth0,type=veth',
-            #  'ostype': 'ubuntu', 'nameserver': '91.xxx.xxx.xx 8.8.8.8',
-            #  'arch': 'amd64'}
-            # Example new config: {
-            #  'rootfs': 'mc11-6-local-ssd:subvol-160-disk-1,size=20G',
-            #  'searchdomain': '91.xxx.xxx.xx', 'cpuunits': 1024,
-            #  'ostemplate':
-            #      # Note that 'vztmpl' is hardcoded in PVE/Storage/Plugin.pm
-            #      'san06:vztmpl/ubuntu-14.04-standard_14.04-1_amd64.tar.gz',
-            #  'arch': 'amd64', 'cpulimit': '2',
-            #  'hostname': 'osso-swift-mgmt-tcn--CREATING',
-            #  'nameserver': '91.xxx.xxx.xx 8.8.8.8', 'memory': 2048,
-            #  'net0': 'bridge=vmbr0,gw=10.xxx.x.x,hwaddr=66:xx:xx:xx:xx:xx,'
-            #      'ip=10.xxx.x.xx/24,name=eth0,type=veth', 'ostype': 'ubuntu',
-            #  'net1': 'bridge=vmbr535,hwaddr=32:xx:xx:xx:xx:xx,'
-            #      'ip=10.xx.xx.xx/24,name=eth1,type=veth', 'swap': 0}
+        assert src_vm.name == src_vm.basename + SUFFIX_CLONING, src_vm
+        assert dst_vm.name == dst_vm.basename + SUFFIX_CREATING, dst_vm
+        return dst_vm, is_resuming
 
-            for key, volume in src_vm.get_volumes().items():
-                assert key not in dst_vm.get_volumes(), key
+    def _move_vm_volumes(self, src_vm, dst_vm, is_resuming):
+        # LXC(FIXME): Here we should migrate/copy the ROOTFS data
+        # for LXC too. Example old config: {
+        #  'rootfs': 'pool0-pve2-ssd:subvol-105-disk-1,size=20G',
+        #  'searchdomain': '91.xxx.xxx.xx', 'cpuunits': 1024,
+        #  'cpulimit': '2', 'swap': 0, 'hostname': 'osso-xxxxxxxxxxxxxx',
+        #  'net1': 'bridge=vmbr535,hwaddr=32:xx:xx:xx:xx:xx,'
+        #      'ip=10.xx.xx.xx/24,name=eth1,type=veth',
+        #  'memory': 2048, 'net0': 'bridge=vmbr0,gw=10.xxx.x.x,'
+        #      'hwaddr=66:xx:xx:xx:xx:xx,ip=10.xxx.x.xx/24,'
+        #      'name=eth0,type=veth',
+        #  'ostype': 'ubuntu', 'nameserver': '91.xxx.xxx.xx 8.8.8.8',
+        #  'arch': 'amd64'}
+        # Example new config: {
+        #  'rootfs': 'mc11-6-local-ssd:subvol-160-disk-1,size=20G',
+        #  'searchdomain': '91.xxx.xxx.xx', 'cpuunits': 1024,
+        #  'ostemplate':
+        #      # Note that 'vztmpl' is hardcoded in PVE/Storage/Plugin.pm
+        #      'san06:vztmpl/ubuntu-14.04-standard_14.04-1_amd64.tar.gz',
+        #  'arch': 'amd64', 'cpulimit': '2',
+        #  'hostname': 'osso-swift-mgmt-tcn--CREATING',
+        #  'nameserver': '91.xxx.xxx.xx 8.8.8.8', 'memory': 2048,
+        #  'net0': 'bridge=vmbr0,gw=10.xxx.x.x,hwaddr=66:xx:xx:xx:xx:xx,'
+        #      'ip=10.xxx.x.xx/24,name=eth0,type=veth', 'ostype': 'ubuntu',
+        #  'net1': 'bridge=vmbr535,hwaddr=32:xx:xx:xx:xx:xx,'
+        #      'ip=10.xx.xx.xx/24,name=eth1,type=veth', 'swap': 0}
+        for key, volume in src_vm.get_volumes().items():
+            if not is_resuming and key in dst_vm.get_volumes():
+                raise ProxmoveError('{!r} already in volume?'.format(key))
 
-                if volume.is_removable():
-                    storage = None  # eject
-                elif self.skip_disks:
-                    log.debug('Not copying volume {} as requested'.format(key))
-                    storage = None
-                else:
-                    storage = self.dst_storage
-
-                dst_vm.create_volume(key, volume, storage=storage)
-
-            # Done? Rename both.
-            dst_vm.rename(name_from_conf(dst_vm.type, dst_config))
-            src_vm.rename(src_vm_name + SUFFIX_MIGRATED)
-            src_vm.add_comment('{} UTC: Migrated to {}'.format(
-                datetime.utcnow(), dst_vm))
-
-            # Start VM.
-            if self.skip_start:
-                log.debug('Not starting VM as requested')
+            if volume.is_removable():
+                storage = None  # eject
+            elif self.skip_disks:
+                log.debug('Not copying volume {} as requested'.format(key))
+                storage = None
             else:
-                dst_vm.ensure_started()
+                storage = self.dst_storage
 
-            log.info('Completed moving {} => {} (node {!r}): {}'.format(
-                self.src_pve, self.dst_pve, self.dst_node, dst_vm.name))
+            dst_vm.create_volume(key, volume, storage=storage)
+
+    def _finish_moving_vm(self, src_vm, dst_vm):
+        # Done? Rename both.
+        dst_vm.rename(dst_vm.basename)
+        src_vm.rename(src_vm.basename + SUFFIX_MIGRATED)
+        src_vm.add_comment('{} UTC: Migrated to {}'.format(
+            datetime.utcnow(), dst_vm))
+
+        # Start VM.
+        if self.skip_start:
+            log.debug('Not starting VM as requested')
+        else:
+            dst_vm.ensure_started()
+
+        log.info('Completed moving {} => {} (node {!r}): {}'.format(
+            self.src_pve, self.dst_pve, self.dst_node, dst_vm.name))
 
 
 class CommandLoader(object):
