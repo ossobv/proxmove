@@ -21,7 +21,7 @@ import string
 import subprocess
 import sys
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from datetime import datetime
 from proxmoxer import ProxmoxAPI, ResourceException
 from http.client import InvalidURL
@@ -1164,8 +1164,8 @@ class ProxmoxVm(object):
 
     def get_volumes(self):
         if 'volumes' not in self._cache:
-            volumes = {}
-            for key, value in self.get_config().items():
+            volumes = OrderedDict()
+            for key, value in sorted(self.get_config().items()):
                 if PROXMOX_VOLUME_TYPES_RE.match(key):
                     location, properties = value.split(',', 1)
                     if location == 'none':
