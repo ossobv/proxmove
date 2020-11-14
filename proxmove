@@ -581,6 +581,24 @@ class ProxmoxStorage(object):
                 'temp dir {!r} on storage {!r} does not exist; '
                 'please create it!'.format(self.temp, self.name))
 
+    def get_physical_size(self, image_location):
+        """
+        Get exact size of physical (host-observed) disk.
+        """
+        raise NotImplementedError("subclasses need to implement this")
+
+    def get_volume_size(self, image_location):
+        """
+        Get exact size of (guest-observed) volume.
+        """
+        raise NotImplementedError("subclasses need to implement this")
+
+    def get_transfer_size(self, image_location):
+        """
+        Get size which we need to transfer. Probably equals physical size.
+        """
+        return self.get_physical_size(image_location)
+
     def copy(self, image_size, disk_size, src_location, src_format,
              dst_storage, dst_id, dst_name):
         new_path, new_format = dst_storage.copy_already_done(
@@ -763,23 +781,39 @@ class ProxmoxStoragePlain(ProxmoxStorage):
 
         return cls(name)
 
-    def get_image_size(self, image_location):
-        path = os.path.join(self.path, image_location)
-        # Use ls -l instead of stat because stat %s/%z is not
-        # standardized across BSD/GNU.
-        try:
-            data = self.ssh_command(
-                ['ls', '-l', path], hide_stderr=True)
-        except subprocess.CalledProcessError:
-            log.warning(
-                'Could not get image size from plain storage {!r}'.format(
-                    path))
-            return None
+    def get_physical_size(self, image_location):
+        """
+        Read physical disk size using OS tools (ls).
 
-        exact_size = data.split()[4].decode('ascii', 'replace')
-        return int(exact_size)
+        (The size as observed by the VM host.)
+        """
+        if not hasattr(self, '_get_physical_size'):
+            self._get_physical_size = {}
 
-    def get_disk_size(self, image_location):
+        if image_location not in self._get_physical_size:
+            path = os.path.join(self.path, image_location)
+            # Use ls -l instead of stat because stat %s/%z is not
+            # standardized across BSD/GNU.
+            try:
+                data = self.ssh_command(
+                    ['ls', '-l', path], hide_stderr=True)
+            except subprocess.CalledProcessError:
+                log.warning(
+                    'Could not get image size from plain storage {!r}'.format(
+                        path))
+                exact_size = None
+            else:
+                exact_size = int(data.split()[4].decode('ascii', 'replace'))
+            self._get_physical_size[image_location] = exact_size
+
+        return self._get_physical_size[image_location]
+
+    def get_volume_size(self, image_location):
+        """
+        Read header bytes from qcow/qcow2 image to determine volume size.
+
+        (The size observed by the VM guest.)
+        """
         path = os.path.join(self.path, image_location)
         # Extract the filesystem size from the qcow/qcow2 image.
         # For other formats we have no support yet.
@@ -847,35 +881,36 @@ class ProxmoxStoragePlain(ProxmoxStorage):
         try:
             # test -f on the destination file. The assumption is that it
             # doesn't exist. If it does, we'll have to resume OR abort.
-            # (Not doing 'stat' here directly, because we haven't
-            # checked for stat(1) existence.)
             dst_storage.ssh_command(['test', '!', '-f', dst_temp])
         except subprocess.CalledProcessError:
             # It exists already. "Compare" files and auto-resume of equal.
-            self._copy_to_temp_verify_existing(src_path, dst_storage, dst_temp)
+            self._copy_to_temp_verify_existing(
+                src_location, dst_storage, dst_temp)
         else:
             # It doesn't exist. Do copy.
             self._copy_to_temp_exec(src_path, dst_storage, dst_temp)
 
         return dst_temp
 
-    def _copy_to_temp_verify_existing(self, src_path, dst_storage, dst_temp):
+    def _copy_to_temp_verify_existing(self, src_location, dst_storage,
+                                      dst_temp):
         """
         Check equality of src_path and dst_temp and raise error if unequal.
         """
-        dst_size, src_size = -1, -2  # unequal!
+        src_size, dst_size = self.get_physical_size(src_location), -1
+        assert src_size != dst_size
         try:
-            dst_size = int(dst_storage.ssh_command(
-                ['stat', '-c', '%s', dst_temp]).strip().decode('ascii'))
-            src_size = int(self.ssh_command(
-                ['stat', '-c', '%s', src_path]).strip().decode('ascii'))
-        except (subprocess.CalledProcessError, UnicodeDecodeError,
-                ValueError):
+            # Use ls -l instead of stat because stat %s/%z is not
+            # standardized across BSD/GNU.
+            data = dst_storage.ssh_command(
+                ['ls', '-l', dst_temp], hide_stderr=True)
+            dst_size = int(data.split()[4].decode('ascii', 'replace'))
+        except (subprocess.CalledProcessError, UnicodeDecodeError, ValueError):
             pass
         log.debug(
             'Comparing existing files {!r} (size {}) with '
             '{!r} (size {})'.format(
-                src_path, src_size, dst_temp, dst_size))
+                src_location, src_size, dst_temp, dst_size))
         if dst_size != src_size:
             raise ProxmoveError(
                 'Temp file {!r} exists on target with different file '
@@ -954,7 +989,29 @@ class ProxmoxStorageZfs(ProxmoxStorage):
                 'missing required binaries ssh and/or zfs and/or mbuffer '
                 'on storage {!r}; please install them'.format(self.name))
 
-    def get_image_size(self, image_location):
+    def get_physical_size(self, image_location):
+        """
+        Get exact size of physical (host-observed) disk (= zvol size).
+        """
+        return self.get_volume_size(image_location)
+
+    def get_volume_size(self, image_location):
+        """
+        Get exact size of (guest-observed) volume.
+        """
+        pool = '{}/{}'.format(self.path, image_location)
+        data = self.ssh_command(
+            ['zfs', 'get', '-Hpo', 'value', 'volsize', pool], hide_stderr=True)
+        number = data.decode('ascii', 'replace').strip()
+        if not number:
+            return None
+
+        return int(number)
+
+    def get_transfer_size(self, image_location):
+        """
+        Get size which we need to transfer. This is an estimate!
+        """
         temp_snapname = '{}/{}@temp-{}'.format(
             self.path, image_location, random.random())
         data = self.ssh_command(
@@ -965,27 +1022,17 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         if not parts:
             log.warning(
                 'Could not get image size from ZFS snapshot; '
-                'trying disk_size instead')
-            return self.get_disk_size(image_location)
+                'trying volume size instead')
+            return self.get_volume_size(image_location)
 
         human_size = parts[-1].decode('ascii', 'replace')
         # Add a bit of size since it's a guesstimate. You'd rather not
         # see the transfer go over 100%.
         return int(human_size_scan(human_size) * 1.02)
 
-    def get_disk_size(self, image_location):
-        pool = '{}/{}'.format(self.path, image_location)
-        data = self.ssh_command(
-            ['zfs', 'list', '-H', '-o', 'volsize', pool], hide_stderr=True)
-        number = data.decode('ascii', 'replace').strip()
-        if not number:
-            return None
-
-        return int(human_size_scan(number))  # hope this is accurate
-
     def copy_already_done(self, dst_name, disk_size, image_size):
         try:
-            found_size = self.get_disk_size(dst_name)
+            found_size = self.get_volume_size(dst_name)
         except CalledProcessError2:
             # Does not exist. All good. We'll copy it.
             return None, None
@@ -1352,10 +1399,10 @@ class ProxmoxVolume(object):
         if not hasattr(self, cache_key):
             if self.storage:
                 if observer == 'host':
-                    setattr(self, cache_key, self.storage.get_image_size(
+                    setattr(self, cache_key, self.storage.get_transfer_size(
                         self.location))
                 elif observer == 'guest':
-                    setattr(self, cache_key, self.storage.get_disk_size(
+                    setattr(self, cache_key, self.storage.get_volume_size(
                         self.location))
                 else:
                     raise NotImplementedError(observer)
