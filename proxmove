@@ -518,7 +518,7 @@ class ProxmoxCluster(object):
         if not isinstance(version, dict) or 'release' not in version:
             raise ProxmoveError(
                 'cluster {!r} did not return proper version: {!r}'.format(
-                    version))
+                    self.name, version))
         self.repoid = version['repoid']
 
     def __str__(self):
