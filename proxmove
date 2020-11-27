@@ -727,9 +727,6 @@ class ProxmoxStorage(object):
     def set_ssh_ciphers(self, ssh_ciphers):
         self.ssh_ciphers = ssh_ciphers
 
-    def get_volume(self, location, properties):
-        return ProxmoxVolume(location, properties, storage=self)
-
     def set_from_section(self, section):
         for key, value in section:
             if key == 'ssh':
@@ -1256,16 +1253,11 @@ class ProxmoxVm(object):
     def get_volumes(self):
         if 'volumes' not in self._cache:
             volumes = OrderedDict()
-            for key, value in sorted(self.get_config().items()):
-                if PROXMOX_VOLUME_TYPES_RE.match(key):
-                    location, properties = value.split(',', 1)
-                    if location == 'none':
-                        volume = ProxmoxVolume(None, properties)
-                    else:
-                        storage, location = location.split(':', 1)
-                        storage = self.cluster.get_storage(self.node, storage)
-                        volume = storage.get_volume(location, properties)
-                    volumes[key] = volume
+            for slot, value in sorted(self.get_config().items()):
+                volume = ProxmoxVolume.from_cluster_node_and_config(
+                    self.cluster, self.node, slot, value)
+                if volume:
+                    volumes[slot] = volume
             self._cache['volumes'] = volumes
         return self._cache['volumes']
 
@@ -1340,6 +1332,42 @@ class ProxmoxVm(object):
 
 
 class ProxmoxVolume(object):
+    @classmethod
+    def from_cluster_node_and_config(self, cluster, node, slot, value):
+        """
+        Return ProxmoxVolume from cluster, node, slot and value, or None
+        if this is not a volume type.
+        """
+        if not PROXMOX_VOLUME_TYPES_RE.match(slot):
+            return None
+
+        # cluster = <...>
+        # node = 'pveX'
+        # slot = 'ide2', 'virtio0'
+        # value = 'local:iso/ubuntu-18.04-amd64.iso,media=cdrom',
+        #         'nfs07:113/vm-113-disk-0.qcow2,size=70G'
+        #         'none,media=cdrom'
+        try:
+            storage_location, properties = value.split(',', 1)
+            if storage_location == 'none':
+                storage, location = None, None
+            else:
+                storage, location = storage_location.split(':', 1)
+        except ValueError:
+            raise ProxmoveError('disk slot {!r} parse error: {!r}'.format(
+                slot, value))
+
+        # Removable disk? Assume it's ejected, so we don't need to look
+        # up the storage for it.
+        if 'media=cdrom' in properties.split(','):
+            storage = location = None
+
+        if storage:
+            # Might raise exception if not found.
+            storage = cluster.get_storage(node, storage)
+
+        return ProxmoxVolume(location, properties, storage=storage)
+
     def __init__(self, location, properties, storage=None):
         self.location = location
         self.properties = properties
