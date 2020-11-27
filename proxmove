@@ -811,13 +811,17 @@ class ProxmoxStoragePlain(ProxmoxStorage):
 
         (The size observed by the VM guest.)
         """
-        path = os.path.join(self.path, image_location)
-        # Extract the filesystem size from the qcow/qcow2 image.
-        # For other formats we have no support yet.
-        if not path.endswith(('.qcow', '.qcow2')):
-            # Non-qcow2 image not supported at this time...
+        if image_location.endswith('.raw'):
+            # Raw image? Then its size is equal to the file size.
+            return self.get_physical_size(image_location)
+        elif image_location.endswith(('.qcow', '.qcow2')):
+            # Extract the filesystem size from the qcow/qcow2 image below.
+            pass
+        else:
+            # No support yet for other formats.
             return None
 
+        path = os.path.join(self.path, image_location)
         try:
             data = self.ssh_command(
                 ['hd', path, '|', 'head', '-n2'], hide_stderr=True)
@@ -1427,13 +1431,16 @@ class ProxmoxVolume(object):
         if not hasattr(self, cache_key):
             if self.storage:
                 if observer == 'host':
-                    setattr(self, cache_key, self.storage.get_transfer_size(
-                        self.location))
+                    size = self.storage.get_transfer_size(self.location)
                 elif observer == 'guest':
-                    setattr(self, cache_key, self.storage.get_volume_size(
-                        self.location))
+                    size = self.storage.get_volume_size(self.location)
+                    size_property = self.get_property('size')  # ",size=64G"
+                    if size_property:
+                        size_property = human_size_scan(size_property)
+                        assert size == size_property, (size, size_property)
                 else:
                     raise NotImplementedError(observer)
+                setattr(self, cache_key, size)
             else:
                 setattr(self, cache_key, None)
 
