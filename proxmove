@@ -39,9 +39,9 @@ log = logging.getLogger('proxmove')
 
 # Drop LC_* from environment.
 environ = os.environ
-for key in list(environ.keys()):
-    if key.startswith('LC_'):
-        del environ[key]
+for _key in list(environ.keys()):
+    if _key.startswith('LC_'):
+        del environ[_key]
 
 SUFFIX_CLONING = '--CLONING'    # source, when cloning
 SUFFIX_CREATING = '--CREATING'  # dest, while cloning
