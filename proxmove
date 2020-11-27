@@ -371,16 +371,20 @@ class ProxmoxCluster(object):
         if not nodeid:
             nodeid = self.get_random_node()
 
+        name = name_from_conf(type_, config)
+        suffix = SUFFIX_CREATING
+        name_with_suffix = '{}{}'.format(name, suffix)
+
         log.info('Creating new VM {!r} on {!r}, node {!r}'.format(
-            name_from_conf(type_, config), self.name, nodeid))
+            name_with_suffix, self.name, nodeid))
 
         # Create disks according to config. Temporarily set ide\d+ and
         # virtio\d+ devices to none until we can get them copied over.
         mutable_config = {}
         for key, value in config.items():
-            if ((type_ == 'lxc' and key == 'hostname') or
-                    (type_ != 'lxc' and key == 'name')):
-                mutable_config[key] = value + SUFFIX_CREATING
+            if key in ('hostname', 'name'):
+                # Set this manually.
+                pass
 
             elif PROXMOX_VOLUME_TYPES_RE.match(key):
                 # Wipe it. We'll add the disks manually later on.
@@ -426,8 +430,12 @@ class ProxmoxCluster(object):
         # Create new VM.
         api_node = self.api.nodes(nodeid)
         try:
-            vmhash = getattr(api_node, type_).create(
-                vmid=vmid, **mutable_config)
+            if type_ == 'lxc':
+                vmhash = getattr(api_node, type_).create(
+                    vmid=vmid, hostname=name_with_suffix, **mutable_config)
+            else:
+                vmhash = getattr(api_node, type_).create(
+                    vmid=vmid, name=name_with_suffix, **mutable_config)
         except ResourceException:
             log.exception(
                 'Failed to create VM with parameters:\n\n'
@@ -442,11 +450,11 @@ class ProxmoxCluster(object):
         # Wait a while to ensure that we get the VM.
         log.info(
             '- created new VM {!r} as {}; waiting for it to show up'.format(
-                name_from_conf(type_, mutable_config), vmhash))
+                name_with_suffix, vmhash))
         for i in range(30):
             try:
                 self._cache = {}  # purge cache, we expect changes
-                vm = self.get_vm(name_from_conf(type_, mutable_config))
+                vm = self.get_vm(name, suffix=suffix)
             except ProxmoxVm.DoesNotExist:
                 pass
             else:
@@ -454,7 +462,7 @@ class ProxmoxCluster(object):
             time.sleep(1)
         else:
             raise ProxmoveError('Could not get newly created VM {!r}'.format(
-                name_from_conf(type_, mutable_config)))
+                name_with_suffix))
 
         log.info('- created new VM {!r}: {}'.format(vm.name, vm))
         return vm
@@ -1229,7 +1237,8 @@ class ProxmoxVm(object):
         """
         if 'config' not in self._cache:
             next_config = self.api_vm.config.get()
-            self.name = name_from_conf(self.type, next_config)
+            name = name_from_conf(self.type, next_config)
+            assert name == self.name, (name, self.name)
             self._cache['config'] = next_config
         return self._cache['config']
 
@@ -1559,12 +1568,12 @@ class VmMover(object):
 
     def prepare_vm_check_source(self, vm_name):
         for suffix in (SUFFIX_CLONING, SUFFIX_MIGRATED):
-            vm_name_with_suffix = '{}{}'.format(vm_name, suffix)
             try:
-                self.src_pve.get_vm(vm_name_with_suffix)
+                self.src_pve.get_vm(vm_name, suffix=suffix)
             except ProxmoxVm.DoesNotExist:
                 pass
             else:
+                vm_name_with_suffix = '{}{}'.format(vm_name, suffix)
                 err = 'VM {!r} exists on source already'.format(
                     vm_name_with_suffix)
                 if suffix == SUFFIX_CLONING:
@@ -1573,12 +1582,12 @@ class VmMover(object):
 
     def prepare_vm_check_destination(self, vm_name):
         for suffix in ('', SUFFIX_CREATING):
-            vm_name_with_suffix = '{}{}'.format(vm_name, suffix)
             try:
-                self.dst_pve.get_vm(vm_name_with_suffix)
+                self.dst_pve.get_vm(vm_name, suffix=suffix)
             except ProxmoxVm.DoesNotExist:
                 pass
             else:
+                vm_name_with_suffix = '{}{}'.format(vm_name, suffix)
                 err = 'VM {!r} exists on destination already'.format(
                     vm_name_with_suffix)
                 if suffix == SUFFIX_CREATING:
