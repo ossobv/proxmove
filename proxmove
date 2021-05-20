@@ -935,7 +935,7 @@ class ProxmoxStoragePlain(ProxmoxStorage):
         if ':' in dst_storage.ssh:
             user_host, port = dst_storage.ssh.split(':', 1)
         else:
-            user_host, port = self.ssh, '22'
+            user_host, port = dst_storage.ssh, '22'
 
         scp_dest = '{}:{}'.format(user_host, dst_temp)
         log.info('scp(1) copy from {!r} (on {}) to {!r}'.format(
@@ -1126,6 +1126,12 @@ class ProxmoxStorageZfs(ProxmoxStorage):
                 'pv(1) command is not found on the destination storage; '
                 'consider installing it to get a pretty progress bar')
 
+        # ...
+        if ':' in dst_storage.ssh:
+            user_host, port = dst_storage.ssh.split(':', 1)
+        else:
+            user_host, port = dst_storage.ssh, '22'
+
         # Older mbuffer(1) [v20140310-3] on the receiving end
         # may say: "mbuffer: warning: No controlling terminal
         # and no autoloader command specified." This is fixed
@@ -1133,13 +1139,14 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         self.ssh_command(
             ["zfs send -R {src_zfs} | "
              "mbuffer -q -s 128k -m 1G {src_bwlim} | "
-             "ssh -o StrictHostKeyChecking=no {dst_ssh} "
+             "ssh -o StrictHostKeyChecking=no {dst_userhost} -p {dst_port} "
              "'mbuffer {optional_quiet_mbuffer} -s 128k -m 1G | "
              " {dst_pv}"
              " zfs recv {dst_zfs}'".format(
                  src_zfs=src_zfs,
                  src_bwlim=mbuffer_write_limit,
-                 dst_ssh=dst_storage.ssh,
+                 dst_userhost=user_host,
+                 dst_port=port,
                  optional_quiet_mbuffer=(
                      '-q' if optional_pv_pipe else ''),
                  dst_pv=optional_pv_pipe,
