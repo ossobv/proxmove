@@ -50,6 +50,7 @@ PROXMOX_VOLUME_TYPES = (
     'efidisk', 'ide', 'sata', 'scsi', 'virtio')
 PROXMOX_VOLUME_TYPES_RE = re.compile(  # "scsi0", but not "scsihw"
     r'^({})\d+$'.format('|'.join(PROXMOX_VOLUME_TYPES)))
+PROXMOVE_VOLUME_NAME_FMT = 'vm-{vmid}-disk-{diskidx}'  # dst volume name
 
 
 def argv2str(argv):
@@ -1207,6 +1208,7 @@ class ProxmoxVm(object):
         self.api = api
         self.api_vm = getattr(api.nodes(node), type_)(id_)
         self.cluster = cluster
+        self.volumes = 0  # used to index/create the new volume names
         self._cache = {}
 
     def check_config(self):
@@ -1250,26 +1252,38 @@ class ProxmoxVm(object):
             self._cache['config'] = next_config
         return self._cache['config']
 
-    def create_volume(self, key, source_volume, storage):
+    def create_volume(self, volume_key, source_volume, storage):
         """
         Create volume from source_volume.
         """
+        assert PROXMOX_VOLUME_TYPES_RE.match(volume_key), volume_key
+
         if storage is None:
             # Take properties and set first argument to 'none'.
             # E.g. "san06:abc.iso,media=cdrom" => "none,media=cdrom"
             parts = source_volume.properties.split(',', 1)
             parts[0] = 'none'
             properties = ','.join(parts)
-            self.api_vm.config.put(**{key: properties})
+            self.api_vm.config.put(**{volume_key: properties})
             self._cache = {}
             log.info('Ejected (cdrom?) volume {!r} ({}) added to {}'.format(
-                key, properties, self))
+                volume_key, properties, self))
         else:
+            # Generate the new disk name. This might be completely
+            # different from what you had on the source. Here it's by
+            # disk order (taken from the source volumes ordered didct).
+            new_volume_name = PROXMOVE_VOLUME_NAME_FMT.format(
+                vmid=self.id, diskidx=self.volumes)
+
             # We actually have to do copying.
-            log.info('Begin copy of {!r} ({}) to {}'.format(
-                key, source_volume, storage))
-            new_volume = source_volume.clone(storage, self.id, key)
-            self.api_vm.config.put(**{key: new_volume.as_properties()})
+            log.info('Begin copy of {!r} ({}) to {} ({})'.format(
+                volume_key, source_volume, storage, new_volume_name))
+            new_volume = source_volume.clone(
+                new_storage=storage, new_vmid=self.id,
+                new_volume_name=new_volume_name)
+            self.api_vm.config.put(**{volume_key: new_volume.as_properties()})
+
+            self.volumes += 1
 
     def get_volumes(self):
         if 'volumes' not in self._cache:
@@ -1469,16 +1483,19 @@ class ProxmoxVolume(object):
             return '<unknown>'
         return human_size_fmt(size)
 
-    def clone(self, new_storage, new_vmid, new_key):
+    def clone(self, new_storage, new_vmid, new_volume_name):
         """
-        new_key could be "virtio0" or "ide2" or ...
+        We expect new_volume_name to be constructed from
+        PROXMOVE_VOLUME_NAME_FMT.
         """
+        assert isinstance(new_storage, ProxmoxStorage), new_storage
+        assert str(new_vmid) in new_volume_name, (new_volume_name, new_vmid)
+
         # Create new name and let the storage backend do the copying.
-        new_name = 'vm-{}-{}'.format(new_vmid, new_key)
         new_path, new_format = self.storage.copy(
             self.get_size('host'), self.get_size('guest'),
             self.location, self.get_format(),
-            new_storage, new_vmid, new_name)
+            new_storage, new_vmid, new_volume_name)
 
         # Log message so we know that any percentages shown arealy are
         # irrelevant. (pv(1) gets a guesstimate which may be off by a
@@ -1741,19 +1758,21 @@ class VmMover(object):
         #      'ip=10.xxx.x.xx/24,name=eth0,type=veth', 'ostype': 'ubuntu',
         #  'net1': 'bridge=vmbr535,hwaddr=32:xx:xx:xx:xx:xx,'
         #      'ip=10.xx.xx.xx/24,name=eth1,type=veth', 'swap': 0}
-        for key, volume in src_vm.get_volumes().items():
-            if not is_resuming and key in dst_vm.get_volumes():
-                raise ProxmoveError('{!r} already in volume?'.format(key))
+        for volume_key, volume in src_vm.get_volumes().items():
+            if not is_resuming and volume_key in dst_vm.get_volumes():
+                raise ProxmoveError('{!r} already in volume?'.format(
+                    volume_key))
 
             if volume.is_removable():
                 storage = None  # eject
             elif self.skip_disks:
-                log.debug('Not copying volume {} as requested'.format(key))
+                log.debug('Not copying volume {} as requested'.format(
+                    volume_key))
                 storage = None
             else:
                 storage = self.dst_storage
 
-            dst_vm.create_volume(key, volume, storage=storage)
+            dst_vm.create_volume(volume_key, volume, storage=storage)
 
     def _finish_moving_vm(self, src_vm, dst_vm):
         # Done? Rename both.
