@@ -28,9 +28,9 @@ from http.client import InvalidURL
 from urllib.parse import urlparse
 
 __author__ = 'Walter Doekes'
-__copyright__ = 'Copyright (C) Walter Doekes, OSSO B.V. 2016-2020'
+__copyright__ = 'Copyright (C) Walter Doekes, OSSO B.V. 2016-2021'
 __licence__ = 'GPLv3+'
-__version__ = '1.0+dev'
+__version__ = '1.1'
 
 # TODO: see NotImplementedErrors
 # TODO: split up into modules (storage, etc.)
