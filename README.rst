@@ -28,6 +28,8 @@ Additional tips:
   ``--skip-start``; that way *proxmove* "completes" successfully when
   done with the move. (You'll still need to change the bridge before
   starting the VM obviously.)
+- If *proxmove* detects that a move was in progress, it will
+  interactively attempt a resume.
 
 
 Full invocation specification (``--help``):
@@ -65,8 +67,8 @@ Full invocation specification (``--help``):
 
     debug arguments:
       --debug               enables extra debug logging
-      --ignore-exists       continue, even though the VM name exists on
-                            the target
+      --ignore-exists       continue when target VM already exists; allows
+                            moving to same cluster
 
     other actions:
       -h, --help            show this help message and exit

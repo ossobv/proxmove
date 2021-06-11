@@ -1861,10 +1861,11 @@ class CommandLoader(object):
             '--debug', action='store_true', help=(
                 'enables extra debug logging'))
         grp.add_argument(
-            # Ignores the fact that a VM exists already. Can be used to test
-            # moves between the same platform.
+            # Ignores the fact that a VM exists already. Can be used to
+            # test/do moves between the same cluster
             '--ignore-exists', action='store_true', help=(
-                'continue, even though the VM name exists on the target'))
+                'continue when target VM already exists; allows moving to '
+                'same cluster'))
 
     def argparse_add_other(self):
         grp = self.parser.add_argument_group('other actions')
