@@ -1,6 +1,8 @@
 Changes
 -------
 
+* **HEAD** - XXXX-XX-XX
+
 * **1.1** - 2021-06-11
 
   Features/fixes:
