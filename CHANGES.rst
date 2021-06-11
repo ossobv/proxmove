@@ -8,10 +8,10 @@ Changes
   Features/fixes:
 
   - Add basic resume support.
-  - Allow :port in ssh=user@host:port config.
+  - Allow ``:port`` in ``ssh=user@host:port`` config.
   - Unmount cdrom media before moving.
-  - Fix destination volume naming (use vm-NNN-disk-N insteaf of
-    vm-NNN-virtioN).
+  - Fix destination volume naming (use ``vm-NNN-disk-N`` instead of
+    ``vm-NNN-virtioN``).
   - Some documentation improvements.
 
 * **1.0** - 2020-01-17
