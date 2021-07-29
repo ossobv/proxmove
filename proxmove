@@ -21,6 +21,7 @@ import string
 import subprocess
 import sys
 import time
+from base64 import b64encode
 from collections import OrderedDict, defaultdict
 from datetime import datetime
 from proxmoxer import ProxmoxAPI, ResourceException
@@ -438,6 +439,22 @@ class ProxmoxCluster(object):
 
         # Create new VM.
         log.debug('- creating VM: {!r}'.format(mutable_config))
+
+        # Fix up smbios1 for changes between PVE 5.x and PVE 6.x:
+        # uuid=12-34-56,manufacturer=blah-123
+        # --> uuid=12-34-56,base64=1,manufacturer=YmxhaC0xMjM=
+        if ',' in mutable_config.get('smbios1') and (
+                ',base64=1,' not in mutable_config['smbios1']):
+            parts = mutable_config['smbios1'].split(',')
+            assert parts[0].startswith('uuid='), mutable_config['smbios1']
+            out = [parts[0], 'base64=1']
+            for part in parts[1:]:
+                key, value = part.split('=', 1)
+                b64value = b64encode(value.encode('utf-8')).decode('ascii')
+                out.append('{}={}'.format(key, b64value))
+            mutable_config['smbios1'] = ','.join(out)
+            log.debug('- setting smbios1 to {!r}'.format(
+                mutable_config['smbios1']))
 
         # Overwrite boot with a safe 'cd' default when
         # 'order=virtio0;ide2;net0' is not supported on this 6.1+6.3 cluster
