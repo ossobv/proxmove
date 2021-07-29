@@ -1326,6 +1326,10 @@ class ProxmoxVm(object):
 
         self.name = new_name
 
+    def set_autoboot(self, boot):
+        boot_int = 1 if boot else 0
+        self.api_vm.config.put(onboot=boot_int)
+
     def ensure_started(self, timeout=120):
         if self.status == 'running':
             log.debug('Skipping start, already running: {}'.format(self))
@@ -1800,6 +1804,7 @@ class VmMover(object):
         # Done? Rename both.
         dst_vm.rename(dst_vm.basename)
         src_vm.rename(src_vm.basename + SUFFIX_MIGRATED)
+        src_vm.set_autoboot(False)
         src_vm.add_comment('{} UTC: Migrated to {}'.format(
             datetime.utcnow(), dst_vm))
 
