@@ -439,6 +439,13 @@ class ProxmoxCluster(object):
         # Create new VM.
         log.debug('- creating VM: {!r}'.format(mutable_config))
 
+        # Overwrite boot with a safe 'cd' default when
+        # 'order=virtio0;ide2;net0' is not supported on this 6.1+6.3 cluster
+        # mix.
+        if True:
+            log.debug('- setting boot=cd workaround for 6.1+6.3 mixcluster')
+            mutable_config['boot'] = 'cd'
+
         api_node = self.api.nodes(nodeid)
         try:
             vmhash = getattr(api_node, type_).create(**mutable_config)
