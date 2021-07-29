@@ -429,24 +429,28 @@ class ProxmoxCluster(object):
                 'DSTDISK:subvol-{vmid}-disk-1,size=20G'.format(
                     vmid=vmid))
 
+        # Set ID and name
+        mutable_config['vmid'] = vmid
+        if type_ == 'lxc':
+            mutable_config['hostname'] = name_with_suffix
+        else:
+            mutable_config['name'] = name_with_suffix
+
         # Create new VM.
+        log.debug('- creating VM: {!r}'.format(mutable_config))
+
         api_node = self.api.nodes(nodeid)
         try:
-            if type_ == 'lxc':
-                vmhash = getattr(api_node, type_).create(
-                    vmid=vmid, hostname=name_with_suffix, **mutable_config)
-            else:
-                vmhash = getattr(api_node, type_).create(
-                    vmid=vmid, name=name_with_suffix, **mutable_config)
+            vmhash = getattr(api_node, type_).create(**mutable_config)
         except ResourceException:
             log.exception(
                 'Failed to create VM with parameters:\n\n'
                 '  # {base_url}\n'
                 '  api.nodes("{node}/{type}")'
-                '.create(vmid={vmid!r}, **{config})\n\n'
+                '.create(**{config})\n\n'
                 .format(
                     base_url=self.api._backend.base_url,
-                    node=nodeid, type=type_, vmid=vmid, config=mutable_config))
+                    node=nodeid, type=type_, config=mutable_config))
             raise
 
         # Wait a while to ensure that we get the VM.
