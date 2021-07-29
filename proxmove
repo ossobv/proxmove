@@ -873,9 +873,9 @@ class ProxmoxStoragePlain(ProxmoxStorage):
         return size
 
     def check_prerequisite_commands(self):
-        if not self.has_commands(['ssh', 'scp']):
+        if not self.has_commands(['ssh', 'rsync']):
             raise PrepareError(
-                'missing required binaries ssh and/or scp on storage {!r}; '
+                'missing required binaries ssh and/or rsync on storage {!r}; '
                 'please install them'.format(self.name))
 
     def copy_already_done(self, dst_name, disk_size, image_size):
@@ -943,22 +943,33 @@ class ProxmoxStoragePlain(ProxmoxStorage):
         else:
             user_host, port = dst_storage.ssh, '22'
 
-        scp_dest = '{}:{}'.format(user_host, dst_temp)
-        log.info('scp(1) copy from {!r} (on {}) to {!r}'.format(
-            src_path, self, scp_dest))
+        rsync_dest = '{}:{}'.format(user_host, dst_temp)
+        log.info('rsync(1) copy from {!r} (on {}) to {!r}'.format(
+            src_path, self, rsync_dest))
 
-        # scp, using ssh+scp instead of local-scp, so we can add our
-        # beloved options.
-        scp_command = ['scp', '-o', 'StrictHostKeyChecking=no']
-        if port != '22':
-            scp_command.extend(['-P', port])
-        # Add bandwidth limits in kbit/s.
+        # Build remote ssh command for rsync. (Prefer rsync(1) over scp(1)
+        # because scp has been observed to be slower.)
+        rsync_ssh = ['ssh', '-o', 'StrictHostKeyChecking=no']
+        if port != 22:
+            rsync_ssh.extend(['-p', str(port)])
+        if self.ssh_ciphers:
+            rsync_ssh.extend(['-c', self.ssh_ciphers])
+
+        # rsync, using ssh+rsync instead of local-rsync, so we can add our
+        # beloved options. (Double quoted because this is passed to ssh_command
+        # first.)
+        rsync_cmd = [
+            'rsync', '--rsh', '"{}"'.format(' '.join(rsync_ssh)), '--progress']
+        if False:
+            rsync_cmd.append('-z')  # gzip compression (yuck, prefer lz4)
+
+        # Add bandwidth limits in MByte/s
         if self.bwlimit_mbps:
-            scp_command.extend(['-l', str(self.bwlimit_mbps * 1024)])
+            rsync_cmd.append('--bwlimit={}m'.format(self.bwlimit_mbps / 8.0))
         # Source/destination.
-        scp_command.extend([src_path, scp_dest])
+        rsync_cmd.extend([src_path, rsync_dest])
         # Exec.
-        self.ssh_command(scp_command, tty=True)
+        self.ssh_command(rsync_cmd, tty=True)
 
     def copy_from_temp(self, disk_size, src_temp, src_format, dst_id,
                        dst_name):
@@ -999,10 +1010,10 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         return cls(name)
 
     def check_prerequisite_commands(self):
-        if not self.has_commands(['ssh', 'zfs', 'mbuffer']):
+        if not self.has_commands(['ssh', 'zfs', 'mbuffer', 'rsync']):
             raise PrepareError(
-                'missing required binaries ssh and/or zfs and/or mbuffer '
-                'on storage {!r}; please install them'.format(self.name))
+                'missing one or more required binaries mbuffer, rsync, ssh, '
+                'zfs, on storage {!r}; please install them'.format(self.name))
 
     def get_physical_size(self, image_location):
         """
