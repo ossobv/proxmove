@@ -707,7 +707,7 @@ class ProxmoxStorage(object):
     def copy(self, image_size, disk_size, src_location, src_format,
              dst_storage, dst_id, dst_name):
         new_path, new_format = dst_storage.copy_already_done(
-            dst_name, disk_size, image_size)
+            self, dst_name, disk_size, image_size)
         if new_path:
             return new_path, new_format
 
@@ -724,7 +724,7 @@ class ProxmoxStorage(object):
 
         return new_path, new_format
 
-    def copy_already_done(self, dst_name, disk_size, image_size):
+    def copy_already_done(self, src_storage, dst_name, disk_size, image_size):
         raise NotImplementedError('subclasses need to implemented this')
 
     def copy_to_temp(self, src_location, dst_storage, dst_name):
@@ -875,6 +875,8 @@ class ProxmoxStorage(object):
 
 
 class ProxmoxStoragePlain(ProxmoxStorage):
+    has_snapshot_support = False
+
     @classmethod
     def from_section(cls, name, section):
         paths = [value for key, value in section if key == 'path']
@@ -969,7 +971,7 @@ class ProxmoxStoragePlain(ProxmoxStorage):
                 'missing required binaries ssh and/or rsync on storage {!r}; '
                 'please install them'.format(self.name))
 
-    def copy_already_done(self, dst_name, disk_size, image_size):
+    def copy_already_done(self, src_storage, dst_name, disk_size, image_size):
         log.warning('FIXME: Non-zfs resume not implemented yet')  # XXX
         return None, None
 
@@ -1092,6 +1094,8 @@ class ProxmoxStoragePlain(ProxmoxStorage):
 
 
 class ProxmoxStorageZfs(ProxmoxStorage):
+    has_snapshot_support = True
+
     @classmethod
     def from_section(cls, name, section):
         paths = [value for key, value in section if key == 'path']
@@ -1131,6 +1135,7 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         """
         temp_snapname = '{}/{}@temp-{}'.format(
             self.path, image_location, random.random())
+        # XXX: When resuming a snapshot, this won't be correct.
         data = self.ssh_command(
             ['zfs', 'snapshot', temp_snapname, '&&',
              'zfs', 'send', '-Rnv', temp_snapname, '&&',
@@ -1147,11 +1152,18 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         # see the transfer go over 100%.
         return int(human_size_scan(human_size) * 1.02)
 
-    def copy_already_done(self, dst_name, disk_size, image_size):
+    def copy_already_done(self, src_storage, dst_name, disk_size, image_size):
+        assert self.has_snapshot_support, self
+        if src_storage.has_snapshot_support:
+            # No need to skip, we can just finalize with a tiny snapshot sync.
+            # Plus, we cannot be sure that we have all data, since we may have
+            # started migrating while the source VM was still up.
+            return None, None
+
         try:
             found_size = self.get_volume_size(dst_name)
         except CalledProcessError2:
-            # Does not exist. All good. We'll copy it.
+            # Does not exist. All good. We'll copy it. (Or resume if possible.)
             return None, None
         if disk_size == found_size:
             return dst_name, None
@@ -1207,15 +1219,55 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         # ZFS pool known to belong to dst_storage).
         return dst_name, None
 
+    def _get_latest_zfs_snapshots(self, zfs_name):
+        "Get ZFS snapshots by latest first"
+        try:
+            snapshots = self.ssh_command([
+                'zfs', 'list', '-Honame', '-d1', '-tsnapshot', '-Screation',
+                zfs_name])
+        except CalledProcessError2:
+            # If the destination volume did not exist, we'd end up here.
+            snapshots = []
+        else:
+            # Might be empty if the volume existed but had no snapshots.
+            snapshots = snapshots.decode('ascii').strip()
+            if snapshots:
+                snapshots = [
+                    snapshot.split('@', 1)[1]
+                    for snapshot in snapshots.split('\n')]
+            else:
+                snapshots = []
+        return snapshots
+
     def copy_direct(self, image_size, src_location, dst_storage, dst_name):
-        src_zfs = '{}/{}@proxmove-{}'.format(
-            self.path, src_location, datetime.now().strftime('%y%m%d-%H%M%S'))
+        # ...
+        if ':' in dst_storage.ssh:
+            user_host, port = dst_storage.ssh.split(':', 1)
+        else:
+            user_host, port = dst_storage.ssh, '22'
+
+        src_zfs_snapshot = 'proxmove-{}'.format(
+            datetime.now().strftime('%y%m%d-%H%M%S'))
+        src_zfs = '{}/{}'.format(self.path, src_location)
         dst_zfs = '{}/{}'.format(dst_storage.path, dst_name)
         log.info('zfs(1) send/recv {} data from {!r} to {!r} (on {})'.format(
             (image_size and human_size_fmt(image_size) or '<unknown>'),
             src_zfs, dst_zfs, dst_storage))
 
-        self.ssh_command(['zfs', 'snapshot', src_zfs])
+        # Get any snapshots that existed already ordered by newest first.
+        src_snapshots = self._get_latest_zfs_snapshots(src_zfs)
+        dst_snapshots = dst_storage._get_latest_zfs_snapshots(dst_zfs)
+        for try_snapshot in src_snapshots:
+            if try_snapshot in dst_snapshots:
+                incremental = '-I {}'.format(try_snapshot)
+                force_receive = '-F'
+                break
+        else:
+            incremental = force_receive = ''
+
+        # Create new snapshot.
+        self.ssh_command([
+            'zfs', 'snapshot', '{}@{}'.format(src_zfs, src_zfs_snapshot)])
 
         # mbuffer takes k-, M- or G-bytes
         mbuffer_write_limit = ''
@@ -1234,30 +1286,27 @@ class ProxmoxStorageZfs(ProxmoxStorage):
                 'pv(1) command is not found on the destination storage; '
                 'consider installing it to get a pretty progress bar')
 
-        # ...
-        if ':' in dst_storage.ssh:
-            user_host, port = dst_storage.ssh.split(':', 1)
-        else:
-            user_host, port = dst_storage.ssh, '22'
-
         # Older mbuffer(1) [v20140310-3] on the receiving end
         # may say: "mbuffer: warning: No controlling terminal
         # and no autoloader command specified." This is fixed
         # in newer versions [v20150412-3].
         self.ssh_command(
-            ["zfs send -R {src_zfs} | "
+            ["zfs send -R {incremental} {src_zfs}@{src_zfs_snapshot} | "
              "mbuffer -q -s 128k -m 1G {src_bwlim} | "
              "ssh -o StrictHostKeyChecking=no {dst_userhost} -p {dst_port} "
              "'mbuffer {optional_quiet_mbuffer} -s 128k -m 1G | "
              " {dst_pv}"
-             " zfs recv {dst_zfs}'".format(
+             " zfs recv {force_receive} {dst_zfs}'".format(
+                 incremental=incremental,
                  src_zfs=src_zfs,
+                 src_zfs_snapshot=src_zfs_snapshot,
                  src_bwlim=mbuffer_write_limit,
                  dst_userhost=user_host,
                  dst_port=port,
                  optional_quiet_mbuffer=(
                      '-q' if optional_pv_pipe else ''),
                  dst_pv=optional_pv_pipe,
+                 force_receive=force_receive,
                  dst_zfs=dst_zfs)],
             tty=True)
 
@@ -1363,9 +1412,14 @@ class ProxmoxVm(object):
             self._cache['config'] = next_config
         return self._cache['config']
 
-    def create_volume(self, volume_key, source_volume, storage):
+    def create_volume(
+            self, volume_key, source_volume, storage,
+            requires_snapshot_support):
         """
         Create volume from source_volume.
+
+        If requires_snapshot_support, this is called when the source machine is
+        still up.
         """
         assert PROXMOX_VOLUME_TYPES_RE.match(volume_key), volume_key
 
@@ -1379,10 +1433,12 @@ class ProxmoxVm(object):
             self._cache = {}
             log.info('Ejected (cdrom?) volume {!r} ({}) added to {}'.format(
                 volume_key, properties, self))
-        else:
+        elif not requires_snapshot_support or (
+                source_volume.storage.has_snapshot_support and
+                storage.has_snapshot_support):
             # Generate the new disk name. This might be completely
             # different from what you had on the source. Here it's by
-            # disk order (taken from the source volumes ordered didct).
+            # disk order (taken from the source volumes ordered dict).
             new_volume_name = PROXMOVE_VOLUME_NAME_FMT.format(
                 vmid=self.id, diskidx=self.volumes)
 
@@ -1394,6 +1450,9 @@ class ProxmoxVm(object):
                 new_volume_name=new_volume_name)
             self.api_vm.config.put(**{volume_key: new_volume.as_properties()})
 
+            self.volumes += 1
+        else:
+            # Also increment volumes. So we'll use the same order of disks.
             self.volumes += 1
 
     def get_volumes(self):
@@ -1612,7 +1671,7 @@ class ProxmoxVolume(object):
             self.location, self.get_format(),
             new_storage, new_vmid, new_volume_name)
 
-        # Log message so we know that any percentages shown arealy are
+        # Log message so we know that any percentages shown really are
         # irrelevant. (pv(1) gets a guesstimate which may be off by a
         # few percent. We don't want the user to think the transfer
         # stopped at 98%.)
@@ -1657,6 +1716,9 @@ class DefaultConfigTranslator(object):
 
 
 class VmMover(object):
+    MOVE_INITIAL = 1        # new is down, preparing snapshottable copy
+    MOVE_FINAL = 2          # old/new are down, finalize last changes
+
     def __init__(self, options):
         self.src_pve = options.source
         self.dst_pve = options.destination
@@ -1686,6 +1748,7 @@ class VmMover(object):
             src_suffix = ''
             try:
                 self.prepare_vm_check_source(vm_name)
+
             except ResumablePrepareError as err1:
                 log.warning(err1)
                 try:
@@ -1698,14 +1761,19 @@ class VmMover(object):
                     src_suffix = SUFFIX_CLONING
                 else:
                     raise  # err1
+
             else:
                 try:
                     self.prepare_vm_check_destination(vm_name)
-                except ResumablePrepareError:
+                except ResumablePrepareError as err1:
+                    log.warning(err1)
                     log.warning(
-                        'Not attempting a resume because source did '
-                        'not appear to be in a resumable state')
-                    raise
+                        'Source is still running... please ascertain that '
+                        'the existing destination data is not old and stale')
+                    resume_work = input('Continue [y/N]? ')
+                    if resume_work.strip().lower() != 'y':
+                        raise
+
             vm = self.src_pve.get_vm(vm_name, suffix=src_suffix)
             vms.append(vm)
 
@@ -1826,37 +1894,47 @@ class VmMover(object):
                 volume.get_human_size('guest')))
 
         if not dry_run:
-            dst_vm, is_resuming = self._start_moving_vm(src_vm, translator)
-            self._move_vm_volumes(src_vm, dst_vm, is_resuming)
+            dst_vm = self._start_moving_vm(src_vm, translator)
+            self._move_vm_volumes(src_vm, dst_vm, move_mode=self.MOVE_FINAL)
             self._finish_moving_vm(src_vm, dst_vm)
 
     def _start_moving_vm(self, src_vm, translator):
         if src_vm.name == src_vm.basename:
-            # Pristine VMs: start, by translating config and
-            # creating a new VM.
-            dst_config = translator.config(src_vm.get_config())
-            dst_vm = self.dst_pve.create_vm(
-                src_vm.type, dst_config, nodeid=self.dst_node,
-                poolid=src_vm.poolid)
+            try:
+                # Check for existing target VM. Happens if we're resuming.
+                dst_vm = self.dst_pve.get_vm(
+                    src_vm.basename, suffix=SUFFIX_CREATING)
+            except ProxmoxVm.DoesNotExist:
+                # Pristine VMs: start, by translating config and
+                # creating a new VM.
+                dst_config = translator.config(src_vm.get_config())
+                dst_vm = self.dst_pve.create_vm(
+                    src_vm.type, dst_config, nodeid=self.dst_node,
+                    poolid=src_vm.poolid)
+
+            # Do initial attempt at moving VM volumes before bringing the
+            # source down. This is possible if we have snapshot support.
+            self._move_vm_volumes(src_vm, dst_vm, move_mode=self.MOVE_INITIAL)
+            # It is important that we reset the volumes count for the
+            # MOVE_FINAL run.
+            dst_vm.volumes = 0
 
             # Stop old VM and rename.
             src_vm.ensure_stopped()
             src_vm.rename(src_vm.basename + SUFFIX_CLONING)
-            is_resuming = False
         else:
-            # Okay. When name!=basename we're already started.
+            # Okay. When name!=basename we've already started.
             assert src_vm.poolid == dst_vm.poolid, (
                 src_vm.poolid, dst_vm.poolid)
             assert src_vm.name == src_vm.basename + SUFFIX_CLONING, src_vm
             dst_vm = self.dst_pve.get_vm(
                 src_vm.basename, suffix=SUFFIX_CREATING)
-            is_resuming = True
 
         assert src_vm.name == src_vm.basename + SUFFIX_CLONING, src_vm
         assert dst_vm.name == dst_vm.basename + SUFFIX_CREATING, dst_vm
-        return dst_vm, is_resuming
+        return dst_vm
 
-    def _move_vm_volumes(self, src_vm, dst_vm, is_resuming):
+    def _move_vm_volumes(self, src_vm, dst_vm, move_mode):
         # LXC(FIXME): Here we should migrate/copy the ROOTFS data
         # for LXC too. Example old config: {
         #  'rootfs': 'pool0-pve2-ssd:subvol-105-disk-1,size=20G',
@@ -1883,10 +1961,6 @@ class VmMover(object):
         #  'net1': 'bridge=vmbr535,hwaddr=32:xx:xx:xx:xx:xx,'
         #      'ip=10.xx.xx.xx/24,name=eth1,type=veth', 'swap': 0}
         for volume_key, volume in src_vm.get_volumes().items():
-            if not is_resuming and volume_key in dst_vm.get_volumes():
-                raise ProxmoveError('{!r} already in volume?'.format(
-                    volume_key))
-
             if volume.is_removable():
                 storage = None  # eject
             elif self.skip_disks:
@@ -1896,7 +1970,9 @@ class VmMover(object):
             else:
                 storage = self.dst_storage
 
-            dst_vm.create_volume(volume_key, volume, storage=storage)
+            dst_vm.create_volume(
+                volume_key, volume, storage=storage,
+                requires_snapshot_support=(move_mode == self.MOVE_INITIAL))
 
     def _finish_moving_vm(self, src_vm, dst_vm):
         # Done? Rename both.
