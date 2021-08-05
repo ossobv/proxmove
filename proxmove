@@ -266,6 +266,65 @@ class ProxmoxClusters(dict):
         return clusters
 
 
+class ProxmoxPools(object):
+    """
+    Helper to find out which pool a VM is in
+    """
+    def __init__(self, cluster):
+        self._cluster = cluster
+        self._vm_to_pool = None
+
+    def get_poolid(self, vmid):
+        "Get the poolid (name) that the VM is in"
+        self._populate_cache()
+        return self._vm_to_pool.get(int(vmid), None)
+
+    def ensure_poolid(self, poolid):
+        "Make sure poolid exists"
+        try:
+            self._cluster.api.pools.create(poolid=poolid)
+        except ResourceException as e:
+            if str(e).startswith('403'):
+                raise ProxmoveError(
+                    'got 403 when trying to set pool info; '
+                    'do you have the PVEPoolAdmin permission on /pool?')
+
+    def set_poolid(self, vmid, poolid):
+        "Put VM in a poolid, creating the pool if necessary"
+        self.ensure_poolid(poolid)
+        # vms is a comma-separated list of vmid strings.
+        # (To remove one or more, we'd add delete=1.)
+        # (If pool did not exist we'd get: 500, '<poolid>' does not exist)
+        self._cluster.api.pools(poolid).put(vms=str(vmid))
+
+        # Update cache with newly set values.
+        if self._vm_to_pool is not None:
+            self._vm_to_pool[int(vmid)] = poolid
+
+    def _populate_cache(self):
+        if self._vm_to_pool is not None:
+            return
+
+        ret = {}
+        for pooldict in self._cluster.api.pools.get():
+            poolid = pooldict['poolid']  # {'poolid': 'FOOBAR'}
+            try:
+                poolinfo = self._cluster.api.pools(poolid).get()
+            except ResourceException as e:
+                if str(e).startswith('403'):
+                    raise ProxmoveError(
+                        'got 403 when trying to get pool info; '
+                        'do you have the PVEPoolAdmin permission on /pool?')
+                raise
+
+            for memberdict in poolinfo['members']:
+                vmid = int(memberdict['vmid'])
+                assert vmid not in ret, (ret, memberdict)
+                ret[vmid] = poolid
+
+        self._vm_to_pool = ret
+
+
 class ProxmoxCluster(object):
     @classmethod
     def from_section(cls, name, section):
@@ -290,6 +349,7 @@ class ProxmoxCluster(object):
         self.repoid = None
         self.api_url = None
         self.api_verify_ssl = True
+        self.pools = ProxmoxPools(self)
         self._cache = {}
         self._storages = {}
         self._storages_nodespecific = defaultdict(dict)
@@ -370,9 +430,12 @@ class ProxmoxCluster(object):
 
         return self._api
 
-    def create_vm(self, type_, config, nodeid):
+    def create_vm(self, type_, config, nodeid, poolid):
         if not nodeid:
             nodeid = self.get_random_node()
+
+        if poolid is not None:
+            self.pools.ensure_poolid(poolid)
 
         name = name_from_conf(type_, config)
         suffix = SUFFIX_CREATING
@@ -495,6 +558,11 @@ class ProxmoxCluster(object):
                 name_with_suffix))
 
         log.info('- created new VM {!r}: {}'.format(vm.name, vm))
+
+        if poolid is not None:
+            self.pools.set_poolid(vm.id, poolid)
+            log.info('- placed VM {!r} in pool {}'.format(vm.name, poolid))
+
         return vm
 
     def get_vms_dict(self):
@@ -547,8 +615,7 @@ class ProxmoxCluster(object):
             raise ProxmoveError(
                 'VM named {!r} found multiple times in cluster {!r}'.format(
                     name, self.name))
-        vm = self._vms[name] = ProxmoxVm.from_dict(
-            name, res[0], api=self.api, cluster=self)
+        vm = self._vms[name] = ProxmoxVm.from_dict(name, res[0], cluster=self)
         return vm
 
     def ping(self):
@@ -1215,10 +1282,10 @@ class ProxmoxVm(object):
         pass
 
     @classmethod
-    def from_dict(cls, name, dict_, api, cluster):
+    def from_dict(cls, name, dict_, cluster):
         vm = cls(
             name, dict_['name'], dict_['node'], dict_['type'], dict_['vmid'],
-            dict_['status'], api, cluster)
+            dict_['status'], cluster)
 
         # LXC(FIXME): When creating an LXC container, the get_config()
         # may contain a 'digest' only. We need to wait until its fully
@@ -1237,18 +1304,23 @@ class ProxmoxVm(object):
 
         return vm
 
-    def __init__(self, basename, name, node, type_, id_, status, api, cluster):
+    def __init__(self, basename, name, node, type_, id_, status, cluster):
         self.basename = basename  # without "--CREATING" or similar suffix
         self.name = name
         self.node = node
         self.type = type_  # qemu|lxc|...
         self.id = id_
         self.status = status  # "running"/"stopped"
-        self.api = api
-        self.api_vm = getattr(api.nodes(node), type_)(id_)
+        # NOTE: api_vm does not get any magic refresh that lazy calling of the
+        # cluster.api provides.
+        self.api_vm = getattr(cluster.api.nodes(node), type_)(id_)
         self.cluster = cluster
         self.volumes = 0  # used to index/create the new volume names
         self._cache = {}
+
+    @property
+    def poolid(self):
+        return self.cluster.pools.get_poolid(self.id)
 
     def check_config(self):
         """
@@ -1627,7 +1699,13 @@ class VmMover(object):
                 else:
                     raise  # err1
             else:
-                self.prepare_vm_check_destination(vm_name)
+                try:
+                    self.prepare_vm_check_destination(vm_name)
+                except ResumablePrepareError:
+                    log.warning(
+                        'Not attempting a resume because source did '
+                        'not appear to be in a resumable state')
+                    raise
             vm = self.src_pve.get_vm(vm_name, suffix=src_suffix)
             vms.append(vm)
 
@@ -1758,7 +1836,8 @@ class VmMover(object):
             # creating a new VM.
             dst_config = translator.config(src_vm.get_config())
             dst_vm = self.dst_pve.create_vm(
-                src_vm.type, dst_config, nodeid=self.dst_node)
+                src_vm.type, dst_config, nodeid=self.dst_node,
+                poolid=src_vm.poolid)
 
             # Stop old VM and rename.
             src_vm.ensure_stopped()
@@ -1766,6 +1845,8 @@ class VmMover(object):
             is_resuming = False
         else:
             # Okay. When name!=basename we're already started.
+            assert src_vm.poolid == dst_vm.poolid, (
+                src_vm.poolid, dst_vm.poolid)
             assert src_vm.name == src_vm.basename + SUFFIX_CLONING, src_vm
             dst_vm = self.dst_pve.get_vm(
                 src_vm.basename, suffix=SUFFIX_CREATING)

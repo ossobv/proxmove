@@ -134,7 +134,8 @@ clusters you have. For example *apple-cluster* and *banana-cluster*.
     ; shared, and two which exist on a single node only.
     ;
     ; The user requires various permissions found in the PVEVMAdmin role (VM
-    ; allocate + audit) and PVEAuditor role (Datastore audit).
+    ; allocate + audit) and PVEAuditor role (Datastore audit) and PVEPoolAdmin
+    ; (to inspect and create pools).
     ;
     [pve:apple-cluster]
     api=https://user@pve:PASSWORD@apple-cluster.com:443
