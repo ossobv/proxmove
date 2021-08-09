@@ -1455,7 +1455,13 @@ class ProxmoxVm(object):
             new_volume = source_volume.clone(
                 new_storage=storage, new_vmid=self.id,
                 new_volume_name=new_volume_name)
-            self.api_vm.config.put(**{volume_key: new_volume.as_properties()})
+            try:
+                self.api_vm.config.put(
+                    **{volume_key: new_volume.as_properties()})
+            except Exception:
+                log.exception('Issue when adding volum to new VM: {!r}'.format(
+                    new_volume.as_properties()))
+                raise
 
             self.volumes += 1
         else:
