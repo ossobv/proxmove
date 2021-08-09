@@ -1045,7 +1045,7 @@ class ProxmoxStoragePlain(ProxmoxStorage):
         rsync_ssh = ['ssh', '-o', 'StrictHostKeyChecking=no']
         if port != 22:
             rsync_ssh.extend(['-p', str(port)])
-        if self.ssh_ciphers:
+        if self.ssh_ciphers not in (None, '', 'default', 'defaults'):
             rsync_ssh.extend(['-c', self.ssh_ciphers])
 
         # rsync, using ssh+rsync instead of local-rsync, so we can add our
@@ -1286,6 +1286,11 @@ class ProxmoxStorageZfs(ProxmoxStorage):
                 'pv(1) command is not found on the destination storage; '
                 'consider installing it to get a pretty progress bar')
 
+        if self.ssh_ciphers not in (None, '', 'default', 'defaults'):
+            ssh_ciphers = '-c {}'.format(self.ssh_ciphers)
+        else:
+            ssh_ciphers = ''
+
         # Older mbuffer(1) [v20140310-3] on the receiving end
         # may say: "mbuffer: warning: No controlling terminal
         # and no autoloader command specified." This is fixed
@@ -1293,7 +1298,8 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         self.ssh_command(
             ["zfs send -R {incremental} {src_zfs}@{src_zfs_snapshot} | "
              "mbuffer -q -s 128k -m 1G {src_bwlim} | "
-             "ssh -o StrictHostKeyChecking=no {dst_userhost} -p {dst_port} "
+             "ssh {ssh_ciphers} -o StrictHostKeyChecking=no "
+             "{dst_userhost} -p {dst_port} "
              "'mbuffer {optional_quiet_mbuffer} -s 128k -m 1G | "
              " {dst_pv}"
              " zfs recv {force_receive} {dst_zfs}'".format(
@@ -1301,6 +1307,7 @@ class ProxmoxStorageZfs(ProxmoxStorage):
                  src_zfs=src_zfs,
                  src_zfs_snapshot=src_zfs_snapshot,
                  src_bwlim=mbuffer_write_limit,
+                 ssh_ciphers=ssh_ciphers,
                  dst_userhost=user_host,
                  dst_port=port,
                  optional_quiet_mbuffer=(
