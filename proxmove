@@ -1250,7 +1250,7 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         try:
             snapshots = self.ssh_command([
                 'zfs', 'list', '-Honame', '-d1', '-tsnapshot', '-Screation',
-                zfs_name])
+                zfs_name], hide_stderr=True)
         except CalledProcessError2:
             # If the destination volume did not exist, we'd end up here.
             snapshots = []
