@@ -1765,10 +1765,12 @@ class VmMover(object):
         self.dst_storage = options.storage
         self.vms_requested = options.vm
 
-        self.ignore_exists = options.ignore_exists
-        self.skip_disks = options.skip_disks
-        # Don't start if there are no disks..
-        self.skip_start = options.skip_start or options.skip_disks
+        self.opt_ignore_exists = options.ignore_exists
+        self.opt_skip_disks = options.skip_disks
+        self.opt_skip_start = (
+            # Also don't start of there are no disks:
+            options.skip_start or options.skip_disks)
+        self.opt_wait_before_stop = options.wait_before_stop
 
         self.vms_to_move = None
         self.storages = None
@@ -1847,7 +1849,7 @@ class VmMover(object):
                     vm_name_with_suffix)
                 if suffix == SUFFIX_CREATING:
                     raise ResumablePrepareError(err)
-                if not self.ignore_exists:
+                if not self.opt_ignore_exists:
                     raise PrepareError(err)
 
     def prepare_vm_config(self):
@@ -1967,6 +1969,16 @@ class VmMover(object):
             # MOVE_FINAL run.
             dst_vm.volumes = 0
 
+            # If you want to do stuff just before shutting down the old
+            # running instance, now is the time:
+            if self.opt_wait_before_stop:
+                log.info(
+                    'Pausing because of --wait-before-stop. Please do the '
+                    'needful before resuming with Y')
+                resume_work = ''
+                while resume_work != 'y':
+                    resume_work = input('Resume [y]? ').strip().lower()
+
             # Stop old VM and rename.
             src_vm.ensure_stopped()
             src_vm.rename(src_vm.basename + SUFFIX_CLONING)
@@ -2010,7 +2022,7 @@ class VmMover(object):
         for volume_key, volume in src_vm.get_volumes().items():
             if volume.is_removable():
                 storage = None  # eject
-            elif self.skip_disks:
+            elif self.opt_skip_disks:
                 log.debug('Not copying volume {} as requested'.format(
                     volume_key))
                 storage = None
@@ -2030,7 +2042,7 @@ class VmMover(object):
             datetime.utcnow(), dst_vm))
 
         # Start VM.
-        if self.skip_start:
+        if self.opt_skip_start:
             log.debug('Not starting VM as requested')
         else:
             dst_vm.ensure_started()
@@ -2096,6 +2108,11 @@ class CommandLoader(object):
         grp.add_argument(
             '--skip-start', action='store_true', help=(
                 'do the move, but do not start the new instance'))
+        grp.add_argument(
+            '--wait-before-stop', action='store_true', help=(
+                'prepare the move, but ask for user confirmation before '
+                'shutting down the old instance (useful if you have to move '
+                'networks/IPs)'))
         grp.add_argument(
             '--ssh-ciphers', action='store', metavar='CIPHERS',
             default='aes128-gcm@openssh.com,aes128-cbc', help=(
