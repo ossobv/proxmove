@@ -756,7 +756,12 @@ class ProxmoxStorage(object):
     def copy_direct(self, image_size, src_location, dst_storage, dst_name):
         raise NotImplementedError('subclasses need to implemented this')
 
-    def run_command(self, command, hide_stderr=False, tty=False):
+    def run_command(self, command, hide_stderr=False, tty=False, via=None):
+        if via is not None:
+            assert not tty
+            command_str = argv2str(command)
+            return via.ssh_command([command_str], hide_stderr=hide_stderr)
+
         log.debug('(exec) %s', argv2str(command))
 
         kwargs = {}
@@ -811,7 +816,9 @@ class ProxmoxStorage(object):
         assert not (found - expected), (expected, found)
         return True
 
-    def ssh_command(self, command, hide_stderr=False, tty=False):
+    def ssh_command(self, command, hide_stderr=False, tty=False, via=None):
+        assert isinstance(None, (ProxmoxStorage, type(None))), via
+
         if not hasattr(self, '_is_ssh_checked'):
             # We could auto-add host key using StrictHostKeyChecking=no,
             # but I'm not sure we want to.
@@ -843,7 +850,7 @@ class ProxmoxStorage(object):
             extra.append('-t')
         return self.run_command(
             self._ssh_command + extra + command,
-            hide_stderr=hide_stderr, tty=tty)
+            hide_stderr=hide_stderr, tty=tty, via=via)
 
     def set_bandwidth_limit(self, bandwidth_limit):
         self.bwlimit_mbps = bandwidth_limit
@@ -1870,11 +1877,18 @@ class VmMover(object):
                         volume, vm))
 
     def prepare_storage_list(self):
-        storages = set([self.dst_storage])
+        storages = set()
         for vm in self.vms_to_move:
             for volume in vm.get_volumes().values():
                 if volume.storage:
                     storages.add(volume.storage)
+
+        # Check destination storage against access via the sources.
+        for src_storage in storages:
+            # We'll be doing: " ssh src_storage 'ssh dst_storage' "
+            self.dst_storage.ssh_command(['/bin/true'], via=src_storage)
+
+        storages.add(self.dst_storage)
 
         log.debug('Found {} relevant storages: {}'.format(
             len(storages), ', '.join(str(i) for i in storages)))
