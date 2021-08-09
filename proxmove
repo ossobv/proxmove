@@ -353,7 +353,7 @@ class ProxmoxCluster(object):
         self._cache = {}
         self._storages = {}
         self._storages_nodespecific = defaultdict(dict)
-        self._vms = {}
+        self._vms_by_id = {}
 
     def no_verify_ssl(self):
         "Call to disable SSL verification."
@@ -601,10 +601,26 @@ class ProxmoxCluster(object):
         return random.choice(nodes)
 
     def get_vm(self, name, suffix=''):
-        if name in self._vms:
-            return self._vms[name]
-        proxmox_vms = self.get_vms_dict()
         name_with_suffix = name + suffix
+
+        # Find exact match, but warn about others:
+        candidates = []
+        for vm in self._vms_by_id.values():
+            if vm.name == name_with_suffix:
+                return vm
+            if vm.basename == name:
+                candidates.append(vm)
+
+        # Warn about other VMs found. This might be because you're
+        # moving on the same cluster?
+        if candidates:
+            for vm in candidates:
+                log.warning(
+                    'Did not find {}, but did find {} when looking for VM...'
+                    .format(name_with_suffix, vm.name))
+
+        # Look it up, or raise DoesNotExist.
+        proxmox_vms = self.get_vms_dict()
         res = [vm for vm in proxmox_vms if vm.get('name') == name_with_suffix]
         if len(res) == 0:
             raise ProxmoxVm.DoesNotExist(
@@ -615,7 +631,10 @@ class ProxmoxCluster(object):
             raise ProxmoveError(
                 'VM named {!r} found multiple times in cluster {!r}'.format(
                     name, self.name))
-        vm = self._vms[name] = ProxmoxVm.from_dict(name, res[0], cluster=self)
+
+        # Insert and return.
+        vm = ProxmoxVm.from_dict(name, res[0], cluster=self)
+        self._vms_by_id[vm.id] = vm
         return vm
 
     def ping(self):
@@ -1781,8 +1800,10 @@ class VmMover(object):
                 except ResumablePrepareError as err1:
                     log.warning(err1)
                     log.warning(
-                        'Source is still running... please ascertain that '
-                        'the existing destination data is not old and stale')
+                        'Destination is created but source still appears to '
+                        'be running. Looks like you are resuming an initial '
+                        '(pre-shutdown) migration. Please ascertain that '
+                        'the new VM data is not old')
                     resume_work = input('Continue [y/N]? ')
                     if resume_work.strip().lower() != 'y':
                         raise
@@ -1939,7 +1960,6 @@ class VmMover(object):
             # Okay. When name!=basename we've already started.
             assert src_vm.poolid == dst_vm.poolid, (
                 src_vm.poolid, dst_vm.poolid)
-            assert src_vm.name == src_vm.basename + SUFFIX_CLONING, src_vm
             dst_vm = self.dst_pve.get_vm(
                 src_vm.basename, suffix=SUFFIX_CREATING)
 
@@ -2137,7 +2157,10 @@ class CommandLoader(object):
     def process_clusters(self):
         if (not self.args.ignore_exists and
                 self.args.source == self.args.destination):
-            self.parser.error('source and destination arguments are the same')
+            self.parser.error(
+                'source and destination arguments are the same '
+                '(see --ignore-exists if you want to migrate to the '
+                'same cluster)')
 
         self.args.source = self.process_cluster(self.args.source)
         self.args.destination = self.process_cluster(self.args.destination)
