@@ -760,7 +760,8 @@ class ProxmoxStorage(object):
         if via is not None:
             assert not tty
             command_str = argv2str(command)
-            return via.ssh_command([command_str], hide_stderr=hide_stderr)
+            return via.ssh_command(
+                [command_str], hide_stderr=hide_stderr, via_this=True)
 
         log.debug('(exec) %s', argv2str(command))
 
@@ -816,26 +817,35 @@ class ProxmoxStorage(object):
         assert not (found - expected), (expected, found)
         return True
 
-    def ssh_command(self, command, hide_stderr=False, tty=False, via=None):
+    def _get_ssh_args(self, key_forwarding=False):
+        ssh_command = ['ssh']
+
+        if key_forwarding:
+            # If we're doing key forwarding, we don't care about the
+            # ciphers _to_ the this machine, as we expect data
+            # transfers to go from this machine to a _next_ machine.
+            ssh_command.append('-A')
+        elif self.ssh_ciphers not in (None, '', 'default', 'defaults'):
+            ssh_command.extend(['-c', self.ssh_ciphers])
+
+        if ':' in self.ssh:
+            user_host, port = self.ssh.split(':', 1)
+        else:
+            user_host, port = self.ssh, '22'
+        if port != '22':
+            ssh_command.extend(['-p', port])
+
+        ssh_command.append(user_host)
+        return ssh_command
+
+    def ssh_command(self, command, hide_stderr=False, tty=False,
+                    via=None, via_this=False):
         assert isinstance(None, (ProxmoxStorage, type(None))), via
 
         if not hasattr(self, '_is_ssh_checked'):
             # We could auto-add host key using StrictHostKeyChecking=no,
             # but I'm not sure we want to.
-            ssh_command = ['ssh', '-A']
-            if self.ssh_ciphers not in (None, '', 'default', 'defaults'):
-                ssh_command.extend(['-c', self.ssh_ciphers])
-
-            if ':' in self.ssh:
-                user_host, port = self.ssh.split(':', 1)
-            else:
-                user_host, port = self.ssh, '22'
-            if port != '22':
-                ssh_command.extend(['-p', port])
-
-            ssh_command.append(user_host)
-
-            full_command = ssh_command + ['/bin/true']
+            full_command = self._get_ssh_args() + ['/bin/true']
             try:
                 self.run_command(full_command)
             except subprocess.CalledProcessError:
@@ -843,13 +853,12 @@ class ProxmoxStorage(object):
                     'failed to ssh to {!r} for storage {!r}: {}'.format(
                         self.ssh, self.name, argv2str(full_command)))
             self._is_ssh_checked = True
-            self._ssh_command = ssh_command
 
         extra = []
         if tty:
             extra.append('-t')
         return self.run_command(
-            self._ssh_command + extra + command,
+            self._get_ssh_args(key_forwarding=via_this) + extra + command,
             hide_stderr=hide_stderr, tty=tty, via=via)
 
     def set_bandwidth_limit(self, bandwidth_limit):
