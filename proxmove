@@ -1350,7 +1350,8 @@ class ProxmoxStorageZfs(ProxmoxStorage):
                  dst_pv=optional_pv_pipe,
                  force_receive=force_receive,
                  dst_zfs=dst_zfs)],
-            tty=True)
+            tty=True,
+            via_this=True)
 
         # Return name and format (dst_name is the filesystem name on the
         # ZFS pool known to belong to dst_storage).
