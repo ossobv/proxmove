@@ -1495,7 +1495,7 @@ class ProxmoxVm(object):
                 self.api_vm.config.put(
                     **{volume_key: new_volume.as_properties()})
             except Exception:
-                log.exception('Issue when adding volum to new VM: {!r}'.format(
+                log.exception('Issue when adding volume to new VM: {!r}'.format(
                     new_volume.as_properties()))
                 raise
 
@@ -1994,10 +1994,10 @@ class VmMover(object):
             src_vm.rename(src_vm.basename + SUFFIX_CLONING)
         else:
             # Okay. When name!=basename we've already started.
-            assert src_vm.poolid == dst_vm.poolid, (
-                src_vm.poolid, dst_vm.poolid)
             dst_vm = self.dst_pve.get_vm(
                 src_vm.basename, suffix=SUFFIX_CREATING)
+            assert src_vm.poolid == dst_vm.poolid, (
+                src_vm.poolid, dst_vm.poolid)
 
         assert src_vm.name == src_vm.basename + SUFFIX_CLONING, src_vm
         assert dst_vm.name == dst_vm.basename + SUFFIX_CREATING, dst_vm
