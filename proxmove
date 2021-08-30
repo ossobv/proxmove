@@ -122,6 +122,8 @@ def name_from_conf(type_, config):
         assert 'name' not in config, config
         assert 'hostname' in config, config
         return config['hostname']
+    else:
+        assert type_ == 'qemu', type_
 
     assert 'hostname' not in config, config
     assert 'name' in config, config
@@ -430,14 +432,14 @@ class ProxmoxCluster(object):
 
         return self._api
 
-    def create_vm(self, type_, config, nodeid, poolid):
+    def create_vm(self, config, nodeid, poolid):
         if not nodeid:
             nodeid = self.get_random_node()
 
         if poolid is not None:
             self.pools.ensure_poolid(poolid)
 
-        name = name_from_conf(type_, config)
+        name = config['name']
         suffix = SUFFIX_CREATING
         name_with_suffix = '{}{}'.format(name, suffix)
 
@@ -448,87 +450,24 @@ class ProxmoxCluster(object):
         # virtio\d+ devices to none until we can get them copied over.
         mutable_config = {}
         for key, value in config.items():
-            if key in ('hostname', 'name'):
-                # Set this manually.
-                pass
-
-            elif PROXMOX_VOLUME_TYPES_RE.match(key):
+            if PROXMOX_VOLUME_TYPES_RE.match(key):
                 # Wipe it. We'll add the disks manually later on.
                 pass
-
-            elif key == 'vmgenid':
-                # Let proxmox generate this id. Otherwise we may get a "only
-                # root can set 'vmgenid' config".
-                pass
-
             else:
                 mutable_config[key] = value
 
-        # Guess new VMID.
+        # Guess new VMID, set id and name.
         vmid = self.get_free_vmid()
-
-        if type_ == 'lxc':
-            # LXC(FIXME): We need to create the dst filesystem here.
-            # A matter of:
-            #   zfs create -o refquota=HUMAN_SIZE ZFS_PATH_NO_LEAD_SLASH
-            # For example:
-            #   zfs create -o refquota=20G rpool/data/images/subvol-160-disk-1
-            # Next: decide whether we want a super-minimal tar.gz which we'll
-            # simply overwrite during the filesystem copy, or do the copy first
-            # and "install" that image.
-            # Note: possibly also PVEDatastoreAdmin permissions are required
-            # for the untar.
-            assert 'ostemplate' not in mutable_config, mutable_config
-            mutable_config['ostemplate'] = (
-                # Note that 'vztmpl' is a magic constant that defines
-                # that this is a tar.gz source filesystem. See
-                # PVE/Storage/Plugin.pm. Also, for sane debugging of
-                # 500-errors, do an ngrep on port 85 on the destination
-                # host (lo-interface) to get a few more clues.
-                # This file is hardcoded for now, and will not work on
-                # your system.
-                'SRCDISK:vztmpl/ubuntu-14.04-standard_14.04-1_amd64.tar.gz')
-            mutable_config['rootfs'] = (
-                # This requires a leading zfs create. See comments above.
-                'DSTDISK:subvol-{vmid}-disk-1,size=20G'.format(
-                    vmid=vmid))
-
-        # Set ID and name
         mutable_config['vmid'] = vmid
-        if type_ == 'lxc':
-            mutable_config['hostname'] = name_with_suffix
-        else:
-            mutable_config['name'] = name_with_suffix
+        mutable_config['name'] = name_with_suffix
+        assert 'hostname' not in mutable_config, mutable_config  # lxc??
 
         # Create new VM.
         log.debug('- creating VM: {!r}'.format(mutable_config))
 
-        # Fix up smbios1 for changes between PVE 5.x and PVE 6.x:
-        # uuid=12-34-56,manufacturer=blah-123
-        # --> uuid=12-34-56,base64=1,manufacturer=YmxhaC0xMjM=
-        if ',' in mutable_config.get('smbios1') and (
-                ',base64=1,' not in mutable_config['smbios1']):
-            parts = mutable_config['smbios1'].split(',')
-            assert parts[0].startswith('uuid='), mutable_config['smbios1']
-            out = [parts[0], 'base64=1']
-            for part in parts[1:]:
-                key, value = part.split('=', 1)
-                b64value = b64encode(value.encode('utf-8')).decode('ascii')
-                out.append('{}={}'.format(key, b64value))
-            mutable_config['smbios1'] = ','.join(out)
-            log.debug('- setting smbios1 to {!r}'.format(
-                mutable_config['smbios1']))
-
-        # Overwrite boot with a safe 'cd' default when
-        # 'order=virtio0;ide2;net0' is not supported on this 6.1+6.3 cluster
-        # mix.
-        if True:
-            log.debug('- setting boot=cd workaround for 6.1+6.3 mixcluster')
-            mutable_config['boot'] = 'cd'
-
         api_node = self.api.nodes(nodeid)
         try:
-            vmhash = getattr(api_node, type_).create(**mutable_config)
+            vmhash = getattr(api_node, 'qemu').create(**mutable_config)
         except ResourceException:
             log.exception(
                 'Failed to create VM with parameters:\n\n'
@@ -537,7 +476,7 @@ class ProxmoxCluster(object):
                 '.create(**{config})\n\n'
                 .format(
                     base_url=self.api._backend.base_url,
-                    node=nodeid, type=type_, config=mutable_config))
+                    node=nodeid, type='qemu', config=mutable_config))
             raise
 
         # Wait a while to ensure that we get the VM.
@@ -1495,8 +1434,9 @@ class ProxmoxVm(object):
                 self.api_vm.config.put(
                     **{volume_key: new_volume.as_properties()})
             except Exception:
-                log.exception('Issue when adding volume to new VM: {!r}'.format(
-                    new_volume.as_properties()))
+                log.exception(
+                    'Issue when adding volume to new VM: {!r}'.format(
+                        new_volume.as_properties()))
                 raise
 
             self.volumes += 1
@@ -1759,9 +1699,78 @@ class DefaultConfigTranslator(object):
             # concurrent updates.
             if key == 'digest':
                 pass
+            elif key == 'vmgenid':
+                # Let proxmox generate this id. Otherwise we may get a "only
+                # root can set 'vmgenid' config".
+                pass
+            elif key == 'smbios1':
+                new_config[key] = self._set_smbios1(value)
             else:
                 new_config[key] = value
+
+        # Overwrite boot with a safe 'cd' default when
+        # 'order=virtio0;ide2;net0' is not supported on this 6.1+6.3 cluster
+        # mix.
+        if True:
+            log.debug('- setting boot=cd workaround for 6.1+6.3 mixcluster')
+            new_config['boot'] = 'cd'
+
         return new_config
+
+    def _set_smbios1(self, smbios1):
+        # Fix up smbios1 for changes between PVE 5.x and PVE 6.x:
+        # uuid=12-34-56,manufacturer=blah-123
+        # --> uuid=12-34-56,base64=1,manufacturer=YmxhaC0xMjM=
+        if ',' in smbios1 and ',base64=1,' not in smbios1:
+            parts = smbios1.split(',')
+            assert parts[0].startswith('uuid='), smbios1
+            out = [parts[0], 'base64=1']
+            for part in parts[1:]:
+                key, value = part.split('=', 1)
+                b64value = b64encode(value.encode('utf-8')).decode('ascii')
+                out.append('{}={}'.format(key, b64value))
+            smbios1 = ','.join(out)
+            log.debug('- setting smbios1 to {!r}'.format(smbios1))
+        return smbios1
+
+
+class TurnLxcIntoQemuConfigTranslator(DefaultConfigTranslator):
+    def config(self, old_config):
+        new_config = super().config(old_config)
+        if 'name' not in new_config and 'hostname' in new_config:
+            new_config = self._lxc_to_qemu(new_config)
+        return new_config
+
+    def _lxc_to_qemu(self, old_config):
+        new_config = {}
+        for key, value in old_config.items():
+            if key == 'hostname':
+                new_config['name'] = value
+            elif key in (
+                    'arch', 'cpulimit', 'cpuunits', 'nameserver',
+                    'searchdomain', 'rootfs', 'ostemplate', 'ostype', 'swap'):
+                pass
+            elif key.startswith('net') and key[3:].isdigit():
+                new_config[key] = self._lxc_net_to_qemu_net(value)
+            else:
+                new_config[key] = value
+
+        return new_config
+
+    def _lxc_net_to_qemu_net(self, net):
+        # name=eth0,bridge=vmbrXX,gw=10.x.x.x,\
+        #   hwaddr=66:30:64:xx:xx:xx,ip=10.x.x.x/y,type=veth
+        # -> virtio=MAC,bridge=BRIDGE
+        ret = []
+        hwaddr = ''
+        parts = net.split(',')
+        for part in parts:
+            if part.startswith('bridge='):
+                ret.append(part)
+            elif part.startswith('hwaddr='):
+                hwaddr = part[7:]
+        ret.insert(0, 'virtio={}'.format(hwaddr))
+        return ','.join(ret)
 
 
 class VmMover(object):
@@ -1912,7 +1921,7 @@ class VmMover(object):
             storage.check_prerequisites()
 
     def run(self, dry_run):
-        translator = DefaultConfigTranslator()
+        translator = TurnLxcIntoQemuConfigTranslator()
         for vm in self.vms_to_move:
             self.move_vm(vm, translator, dry_run)
 
@@ -1969,7 +1978,7 @@ class VmMover(object):
                 # creating a new VM.
                 dst_config = translator.config(src_vm.get_config())
                 dst_vm = self.dst_pve.create_vm(
-                    src_vm.type, dst_config, nodeid=self.dst_node,
+                    dst_config, nodeid=self.dst_node,
                     poolid=src_vm.poolid)
 
             # Do initial attempt at moving VM volumes before bringing the
@@ -1990,6 +1999,8 @@ class VmMover(object):
                     resume_work = input('Resume [y]? ').strip().lower()
 
             # Stop old VM and rename.
+            if src_vm.type != 'qemu':
+                raise NotImplementedError('No LXC move support')
             src_vm.ensure_stopped()
             src_vm.rename(src_vm.basename + SUFFIX_CLONING)
         else:
