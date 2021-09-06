@@ -8,6 +8,7 @@ another is implemented in the Proxmox Virtual Environment (PVE). But
 migrating a VM from one PVE-cluster to another is not.
 
 proxmove helps you move VMs between PVE-clusters with minimal hassle.
+*And if you use ZFS, with minimal downtime too.*
 
 
 Example invocation:
@@ -22,6 +23,9 @@ first. See `Configuration`_.
 
 Additional tips:
 
+- If source and destination filesystems use ZFS, the move is done in two
+  stages, by copying an initial snapshot while the source VM is still
+  up. Combine with ``--wait-before-stop`` for additional control.
 - Use ``--debug``; it doesn't flood your screen, but provides useful clues
   about what it's doing.
 - If your network bridge is different on the ``DEST_CLUSTER``, use
@@ -29,7 +33,8 @@ Additional tips:
   done with the move. (You'll still need to change the bridge before
   starting the VM obviously.)
 - If *proxmove* detects that a move was in progress, it will
-  interactively attempt a resume.
+  interactively attempt a resume. For ZFS to ZFS syncs, it will do
+  *another* initial resync before shutting down the source VM.
 
 
 Full invocation specification (``--help``):
@@ -37,8 +42,9 @@ Full invocation specification (``--help``):
 .. code-block::
 
     usage: proxmove [-c FILENAME] [-n] [--bwlimit MBPS] [--no-verify-ssl]
-                    [--skip-disks] [--skip-start] [--ssh-ciphers CIPHERS]
-                    [--debug] [--ignore-exists] [-h] [--version]
+                    [--skip-disks] [--skip-start] [--wait-before-stop]
+                    [--ssh-ciphers CIPHERS] [--debug] [--ignore-exists]
+                    [-h] [--version]
                     source destination nodeid storage vm [vm ...]
 
     Migrate VMs from one Proxmox cluster to another.
@@ -59,6 +65,10 @@ Full invocation specification (``--help``):
       --skip-disks          do the move, but skip copying of the disks;
                             implies --skip-start
       --skip-start          do the move, but do not start the new instance
+      --wait-before-stop    prepare the move, but ask for user
+                            confirmation before shutting down the old
+                            instance (useful if you have to move
+                            networks/IPs)
       --ssh-ciphers CIPHERS
                             comma separated list of ssh -c ciphers to
                             prefer, (aes128-gcm@openssh.com is supposed to
