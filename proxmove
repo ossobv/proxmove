@@ -697,10 +697,9 @@ class ProxmoxStorage(object):
 
     def run_command(self, command, hide_stderr=False, tty=False, via=None):
         if via is not None:
-            assert not tty
             command_str = argv2str(command)
             return via.ssh_command(
-                [command_str], hide_stderr=hide_stderr, via_this=True)
+                [command_str], hide_stderr=hide_stderr, tty=tty, via_this=True)
 
         log.debug('(exec) %s', argv2str(command))
 
@@ -794,7 +793,7 @@ class ProxmoxStorage(object):
             self._is_ssh_checked = True
 
         extra = []
-        if tty:
+        if tty and not via:
             extra.append('-t')
         return self.run_command(
             self._get_ssh_args(key_forwarding=via_this) + extra + command,
@@ -1907,7 +1906,9 @@ class VmMover(object):
         # Check destination storage against access via the sources.
         for src_storage in storages:
             # We'll be doing: " ssh src_storage 'ssh dst_storage' "
-            self.dst_storage.ssh_command(['/bin/true'], via=src_storage)
+            # Set tty=True so the user gets any host key questions.
+            self.dst_storage.ssh_command(
+                ['/bin/true'], tty=True, via=src_storage)
 
         storages.add(self.dst_storage)
 
