@@ -1253,7 +1253,8 @@ class ProxmoxStorageZfs(ProxmoxStorage):
             optional_pv_pipe = (
                 # --fineta does not exist on all versions..
                 # --force is required to make it display anything..
-                'pv --force --eta --progress -s {} | '.format(image_size))
+                'pv --force --eta --average-rate --progress -s {} | '.format(
+                    image_size))
         else:
             log.warning(
                 'pv(1) command is not found on the destination storage; '
