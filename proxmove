@@ -320,9 +320,16 @@ class ProxmoxPools(object):
                 raise
 
             for memberdict in poolinfo['members']:
-                vmid = int(memberdict['vmid'])
-                assert vmid not in ret, (ret, memberdict)
-                ret[vmid] = poolid
+                # Examples of memberdict:
+                #   {'name': 'voiphu2', ..., 'id': 'qemu/124', 'type': 'qemu',
+                #    'node': 'rs05', 'vmid': 124, 'diskread': 779919072, ...}
+                #   {'id': 'storage/rs05/local', 'shared': 0,
+                #    'type': 'storage', ..., 'node': 'rs05', ...}
+                # We're only interested in VMs in the pool.
+                if 'vmid' in memberdict:
+                    vmid = int(memberdict['vmid'])
+                    assert vmid not in ret, (ret, memberdict)
+                    ret[vmid] = poolid
 
         self._vm_to_pool = ret
 
