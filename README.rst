@@ -74,6 +74,7 @@ Full invocation specification (``--help``):
                             prefer, (aes128-gcm@openssh.com is supposed to
                             be fast if you have aes on your cpu); set to
                             "-" to use ssh defaults
+      --keep-id             preserve the source vm id (useful if you want to keep a backup trail)
 
     debug arguments:
       --debug               enables extra debug logging
