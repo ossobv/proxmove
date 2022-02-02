@@ -1701,10 +1701,15 @@ class DefaultConfigTranslator(object):
     def config(self, old_config):
         new_config = {}
         for key, value in old_config.items():
-            # The digest is used to prevent changes if the current
-            # config doesn't match the digest. This blocks
-            # concurrent updates.
             if key == 'digest':
+                # The digest is used to prevent changes if the current
+                # config doesn't match the digest. This blocks
+                # concurrent updates.
+                pass
+            elif key == 'meta':
+                # Proxmox [67].x may provide a meta key in the listing, but it
+                # will not accept any on creation. Example:
+                # {'meta': 'creation-qemu=6.1.0,ctime=1643742755'}
                 pass
             elif key == 'vmgenid':
                 # Let proxmox generate this id. Otherwise we may get a "only
