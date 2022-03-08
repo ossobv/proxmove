@@ -439,7 +439,7 @@ class ProxmoxCluster(object):
 
         return self._api
 
-    def create_vm(self, config, nodeid, poolid):
+    def create_vm(self, config, nodeid, poolid, dst_id):
         if not nodeid:
             nodeid = self.get_random_node()
 
@@ -463,9 +463,8 @@ class ProxmoxCluster(object):
             else:
                 mutable_config[key] = value
 
-        # Guess new VMID, set id and name.
-        vmid = self.get_free_vmid()
-        mutable_config['vmid'] = vmid
+        # new VMID, set id and name.
+        mutable_config['vmid'] = dst_id
         mutable_config['name'] = name_with_suffix
         assert 'hostname' not in mutable_config, mutable_config  # lxc??
 
@@ -521,7 +520,7 @@ class ProxmoxCluster(object):
             #         for i in self._cache['cluster.resources.type=vm']))
         return self._cache['cluster.resources.type=vm']
 
-    def get_free_vmid(self):
+    def get_vmids(self):
         """
         BEWARE: To get the numbers right, we need to have enough
         permissions to see all VMs. PVEVMAdmin permissions required?
@@ -529,18 +528,21 @@ class ProxmoxCluster(object):
         self._cache = {}  # purge cache, so we don't get stale VMID lists
         vms = self.get_vms_dict()
         if not vms:
-            return 100
-        ordered_vms = [vm['vmid'] for vm in vms]
+            return []
+        return [vm['vmid'] for vm in vms]
+
+    def get_free_vmid(self):
+        ordered_vms = self.get_vmids()
         ordered_vms.sort()
-        if (ordered_vms[-1] - ordered_vms[0] + 1) == len(ordered_vms):
-            return ordered_vms[-1] + 1
-        prev = ordered_vms[0]
-        for vmid in ordered_vms[1:]:
-            if prev + 1 != vmid:
-                return prev + 1
-            prev = vmid
-        raise NotImplementedError('this cannot happen: {}'.format(
-            ordered_vms))
+        min_vm = 100
+        for vmid in ordered_vms:
+            if min_vm != vmid:
+                return min_vm
+            min_vm += 1
+        return min_vm
+
+    def check_vmid_free(self, vmid):
+        return vmid not in self.get_vmids()
 
     def get_random_node(self):
         nodes = self.get_nodes()
@@ -1802,6 +1804,7 @@ class VmMover(object):
             # Also don't start of there are no disks:
             options.skip_start or options.skip_disks)
         self.opt_wait_before_stop = options.wait_before_stop
+        self.opt_keep_id = options.keep_id
 
         self.vms_to_move = None
         self.storages = None
@@ -1988,12 +1991,25 @@ class VmMover(object):
                 dst_vm = self.dst_pve.get_vm(
                     src_vm.basename, suffix=SUFFIX_CREATING)
             except ProxmoxVm.DoesNotExist:
+                dst_vm = None
+
+            if not dst_vm:
                 # Pristine VMs: start, by translating config and
                 # creating a new VM.
                 dst_config = translator.config(src_vm.get_config())
+
+                if self.opt_keep_id:
+                    dst_id = src_vm.id
+                    if not self.dst_pve.check_vmid_free(dst_id):
+                        raise PrepareError(
+                            '--keep-id is enabled but a VM with id {} already exists in cluster {}'.format(
+                                src_vm.id, self.dst_pve.name))
+                else:
+                    dst_id = self.dst_pve.get_free_vmid()
+
                 dst_vm = self.dst_pve.create_vm(
                     dst_config, nodeid=self.dst_node,
-                    poolid=src_vm.poolid)
+                    poolid=src_vm.poolid, dst_id=dst_id)
 
             # Do initial attempt at moving VM volumes before bringing the
             # source down. This is possible if we have snapshot support.
@@ -2154,6 +2170,9 @@ class CommandLoader(object):
                 'comma separated list of ssh -c ciphers to prefer, '
                 '(aes128-gcm@openssh.com is supposed to be fast if you have '
                 'aes on your cpu); set to "-" to use ssh defaults'))
+        grp.add_argument(
+            '--keep-id', action='store_true', help=(
+                'preserve the source vm id (useful if you want to keep a backup trail)'))
 
     def argparse_add_debug(self):
         grp = self.parser.add_argument_group('debug arguments')
