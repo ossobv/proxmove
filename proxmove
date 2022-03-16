@@ -1988,6 +1988,10 @@ class VmMover(object):
                 dst_vm = self.dst_pve.get_vm(
                     src_vm.basename, suffix=SUFFIX_CREATING)
             except ProxmoxVm.DoesNotExist:
+                # Don't create VM in exception handler. Errors would
+                # then appear like the DoesNotExist is the root cause.
+                dst_vm = None
+            if not dst_vm:
                 # Pristine VMs: start, by translating config and
                 # creating a new VM.
                 dst_config = translator.config(src_vm.get_config())
