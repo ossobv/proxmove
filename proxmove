@@ -669,6 +669,23 @@ class ProxmoxStorage(object):
         """
         return self.get_physical_size(image_location)
 
+    def test_copy(self, dst_storage, src_format=None):
+        """
+        Check if we can copy from source (this) to destination (other).
+        """
+        if not self.can_copy_to(dst_storage, src_format=src_format):
+            raise NotImplementedError(
+                'format conversion from {!r} ({}) to {!r} not implemented'
+                .format(
+                    type(self).__name__, src_format,
+                    type(dst_storage).__name__))
+
+    def can_copy_to(self, dst_storage, src_format=None):
+        raise NotImplementedError("subclasses need to implement this")
+
+    def can_copy_from(self, src_storage, src_format=None):
+        raise NotImplementedError("subclasses need to implement this")
+
     def copy(self, image_size, disk_size, src_location, src_format,
              dst_storage, dst_id, dst_name):
         new_path, new_format = dst_storage.copy_already_done(
@@ -955,6 +972,15 @@ class ProxmoxStoragePlain(ProxmoxStorage):
         log.warning('FIXME: Non-zfs resume not implemented yet')  # XXX
         return None, None
 
+    def can_copy_to(self, dst_storage, src_format=None):
+        # We don't do conversion. Hope the other side does.
+        return dst_storage.can_copy_from(self, src_format=src_format)
+
+    def can_copy_from(self, src_storage, src_format=None):
+        # We don't do conversion and only know about qcow2 and raw.
+        return isinstance(src_storage, ProxmoxStoragePlain) and src_format in (
+            'qcow2', 'raw')
+
     def copy_to_temp(self, src_location, dst_storage, dst_name):
         """
         Copy image from source to a temp destination; checks pre-existence.
@@ -1046,11 +1072,11 @@ class ProxmoxStoragePlain(ProxmoxStorage):
 
     def copy_from_temp(self, disk_size, src_temp, src_format, dst_id,
                        dst_name):
-        if src_format != 'qcow2':
+        if src_format not in ('qcow2', 'raw'):
             raise NotImplementedError(
-                'format conversion from {!r} not implemented'.format(
+                'format conversion from {!r} to plain not implemented'.format(
                     src_format))
-        dst_format = 'qcow2'
+        dst_format = src_format
 
         rel_path = os.path.join(
             str(dst_id), '{}.{}'.format(dst_name, dst_format))
@@ -1150,12 +1176,32 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         return ProxmoveError('Volume {!r} exists.. this is bad'.format(
             dst_name))
 
+    def can_copy_to(self, dst_storage, src_format=None):
+        # Same storage, we should be good.
+        if isinstance(dst_storage, ProxmoxStorageZfs):
+            return True
+
+        # We don't know how to send raw images. Simply cat /dev/zvol/...?
+        return False
+
+    def can_copy_from(self, src_storage, src_format=None):
+        # Same storage, we should be good.
+        if isinstance(src_storage, ProxmoxStorageZfs):
+            return True
+
+        # We can read/convert raw/qcow2 from ProxmoxStoragePlain.
+        if isinstance(src_storage, ProxmoxStoragePlain) and src_format in (
+                'qcow2', 'raw'):
+            return True
+
+        return False
+
     def copy_to_temp(self, src_location, dst_storage, dst_name):
         if isinstance(dst_storage, ProxmoxStorageZfs):
             # ZFS->ZFS copying requires no temp files.
             return None
         else:
-            # TODO: Simply cat /dev/zvol/.../... to the destfile?
+            # Probably copy /dev/zvol/... and set src_format='raw'.
             raise NotImplementedError(
                 'ZFS->other copying is not implemented yet')
 
@@ -1653,6 +1699,13 @@ class ProxmoxVolume(object):
             return '<unknown>'
         return human_size_fmt(size)
 
+    def test_clone(self, new_storage):
+        """
+        Do preliminary checks before cloning/copying a volume.
+        """
+        assert isinstance(new_storage, ProxmoxStorage), new_storage
+        self.storage.test_copy(new_storage, src_format=self.get_format())
+
     def clone(self, new_storage, new_vmid, new_volume_name):
         """
         We expect new_volume_name to be constructed from
@@ -1969,12 +2022,15 @@ class VmMover(object):
             self.src_pve, self.dst_pve, self.dst_node, src_vm.name))
 
         log.info('- source VM {}'.format(src_vm))
-        for key, volume in src_vm.get_volumes().items():
+        for volume_key, volume in src_vm.get_volumes().items():
             # TODO: Check whether volume is accessible? Must be combined
             # with the is_removable() and skip_disks options below.
             log.info('- storage {!r}: {} (host={}, guest={})'.format(
-                key, volume, volume.get_human_size('host'),
+                volume_key, volume, volume.get_human_size('host'),
                 volume.get_human_size('guest')))
+            # NOTE: Test volume moving first. We don't want
+            # NotImplementedError at the end of a long upload.
+            self._move_vm_volume(src_vm, None, volume_key, volume, None)
 
         if not dry_run:
             dst_vm = self._start_moving_vm(src_vm, translator)
@@ -2059,18 +2115,27 @@ class VmMover(object):
         #  'net1': 'bridge=vmbr535,hwaddr=32:xx:xx:xx:xx:xx,'
         #      'ip=10.xx.xx.xx/24,name=eth1,type=veth', 'swap': 0}
         for volume_key, volume in src_vm.get_volumes().items():
-            if volume.is_removable():
-                storage = None  # eject
-            elif self.opt_skip_disks:
-                log.debug('Not copying volume {} as requested'.format(
-                    volume_key))
-                storage = None
-            else:
-                storage = self.dst_storage
+            self._move_vm_volume(src_vm, dst_vm, volume_key, volume, move_mode)
 
+    def _move_vm_volume(self, src_vm, dst_vm, volume_key, volume, move_mode):
+        if volume.is_removable():
+            dst_storage = None  # eject
+        elif self.opt_skip_disks:
+            log.debug('Not copying volume {} as requested'.format(
+                volume_key))
+            dst_storage = None
+        else:
+            dst_storage = self.dst_storage
+
+        if dst_vm:
+            # Do it.
             dst_vm.create_volume(
-                volume_key, volume, storage=storage,
+                volume_key, volume, storage=dst_storage,
                 requires_snapshot_support=(move_mode == self.MOVE_INITIAL))
+        elif dst_storage:
+            # Test only.
+            assert move_mode is None, move_mode
+            volume.test_clone(dst_storage)
 
     def _finish_moving_vm(self, src_vm, dst_vm):
         # Done? Rename both.
