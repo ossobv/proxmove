@@ -644,8 +644,9 @@ class ProxmoxStorage(object):
         raise NotImplementedError('subclasses need to implement this')
 
     def check_prerequisite_paths(self):
+        assert self.temp and self.temp.startswith('/'), self.temp
         try:
-            self.ssh_command(['test', '-d', self.temp])
+            self.ssh_command(['mkdir', '-p', self.temp])
         except subprocess.CalledProcessError:
             raise PrepareError(
                 'temp dir {!r} on storage {!r} does not exist; '
