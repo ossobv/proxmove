@@ -1517,7 +1517,7 @@ class ProxmoxVm(object):
 
         self.name = new_name
 
-    def set_autoboot(self, boot):
+    def configure_autoboot(self, boot):
         boot_int = 1 if boot else 0
         self.api_vm.config.put(onboot=boot_int)
 
@@ -1824,8 +1824,8 @@ class TurnLxcIntoQemuConfigTranslator(DefaultConfigTranslator):
         return new_config
 
     def _lxc_net_to_qemu_net(self, net):
-        # name=eth0,bridge=vmbrXX,gw=10.x.x.x,\
-        #   hwaddr=66:30:64:xx:xx:xx,ip=10.x.x.x/y,type=veth
+        # name=eth0,bridge=vmbr0,gw=10.x.x.x,\
+        #   hwaddr=00:C0:FF:EE:BE:EF,ip=10.x.x.x/y,type=veth
         # -> virtio=MAC,bridge=BRIDGE
         ret = []
         hwaddr = ''
@@ -1997,16 +1997,16 @@ class VmMover(object):
         # Config and notes:
         # {'bootdisk': 'virtio0',
         #  'cores': 8,
-        #  'digest': 'XXXXXXXXXXXXXXXXcfa3e49c8568312e7d148505',
+        #  'digest': '8f8bb34b5544282c71fefc7ed0dbbaa57d148505',
         #  # v-- we "eject" the cdrom, replacing it with "none"
         #  'ide2': 'san06:iso/debian-8.0.0-amd64-netinst.iso,media=cdrom',
         #  'memory': 4096,
         #  'name': 'vm-to-move.example.com',
         #  # v-- vmbr138 will work fine as long as cluster is in same location
-        #  'net0': 'virtio=XX:XX:XX:XX:8B:22,bridge=vmbr138',
+        #  'net0': 'virtio=00:C0:FF:EE:BE:EF,bridge=vmbr138',
         #  # v-- is constant (apparently?)
         #  'ostype': 'l26',
-        #  'smbios1': 'uuid=XXXXXXXX-XXXX-XXXX-8712-e68a063d993e,'
+        #  'smbios1': 'uuid=76223226-e334-488c-ae8a-a174690e2803,'
         #             'manufacturer=example,product=vm-to-move',
         #  'sockets': 1,
         #  # v-- disk moving is covered in ProxmoxVolume
@@ -2142,7 +2142,7 @@ class VmMover(object):
         # Done? Rename both.
         dst_vm.rename(dst_vm.basename)
         src_vm.rename(src_vm.basename + SUFFIX_MIGRATED)
-        src_vm.set_autoboot(False)
+        src_vm.configure_autoboot(False)
         src_vm.add_comment('{} UTC: Migrated to {}'.format(
             datetime.utcnow(), dst_vm))
 
