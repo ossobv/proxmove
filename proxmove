@@ -1751,8 +1751,13 @@ class ProxmoxVolume(object):
         return '{},{}'.format(self.location, self.properties)
 
 
-class DefaultConfigTranslator(object):
+class BaseConfigTranslator(object):
     def config(self, old_config):
+        """
+        Translate VM dict from source to something writable
+
+        Drops readonly properties
+        """
         new_config = {}
         for key, value in old_config.items():
             if key == 'digest':
@@ -1800,7 +1805,7 @@ class DefaultConfigTranslator(object):
         return smbios1
 
 
-class TurnLxcIntoQemuConfigTranslator(DefaultConfigTranslator):
+class TurnLxcIntoQemuConfigTranslator(object):
     def config(self, old_config):
         new_config = super().config(old_config)
         if 'name' not in new_config and 'hostname' in new_config:
@@ -1837,6 +1842,12 @@ class TurnLxcIntoQemuConfigTranslator(DefaultConfigTranslator):
                 hwaddr = part[7:]
         ret.insert(0, 'virtio={}'.format(hwaddr))
         return ','.join(ret)
+
+
+class DefaultConfigTranslator(
+        TurnLxcIntoQemuConfigTranslator,
+        BaseConfigTranslator):
+    pass
 
 
 class VmMover(object):
@@ -1989,7 +2000,7 @@ class VmMover(object):
             storage.check_prerequisites()
 
     def run(self, dry_run):
-        translator = TurnLxcIntoQemuConfigTranslator()
+        translator = DefaultConfigTranslator()
         for vm in self.vms_to_move:
             self.move_vm(vm, translator, dry_run)
 
