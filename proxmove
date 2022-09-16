@@ -873,6 +873,7 @@ class ProxmoxStorage(object):
 
 
 class ProxmoxStoragePlain(ProxmoxStorage):
+    has_discard_support = False
     has_snapshot_support = False
 
     @classmethod
@@ -1101,6 +1102,7 @@ class ProxmoxStoragePlain(ProxmoxStorage):
 
 
 class ProxmoxStorageZfs(ProxmoxStorage):
+    has_discard_support = True
     has_snapshot_support = True
 
     @classmethod
@@ -1407,6 +1409,9 @@ class ProxmoxVm(object):
     def poolid(self):
         return self.cluster.pools.get_poolid(self.id)
 
+    def set_translator(self, config_translator):
+        self._translator = config_translator
+
     def check_config(self):
         """
         Check whether we can move this VM.
@@ -1484,13 +1489,13 @@ class ProxmoxVm(object):
             new_volume = source_volume.clone(
                 new_storage=storage, new_vmid=self.id,
                 new_volume_name=new_volume_name)
+            new_properties = self._translator.volume_properties(new_volume)
             try:
-                self.api_vm.config.put(
-                    **{volume_key: new_volume.as_properties()})
+                self.api_vm.config.put(**{volume_key: new_properties})
             except Exception:
                 log.exception(
                     'Issue when adding volume to new VM: {!r}'.format(
-                        new_volume.as_properties()))
+                        new_properties))
                 raise
 
             self.volumes += 1
@@ -1788,6 +1793,14 @@ class BaseConfigTranslator(object):
 
         return new_config
 
+    def volume_properties(self, new_volume):
+        """
+        Translate volume properties from source to something writable
+
+        Returns new_volume.as_properties()
+        """
+        return new_volume.as_properties()
+
     def _set_smbios1(self, smbios1):
         # Fix up smbios1 for changes between PVE 5.x and PVE 6.x:
         # uuid=12-34-56,manufacturer=blah-123
@@ -1844,7 +1857,27 @@ class TurnLxcIntoQemuConfigTranslator(object):
         return ','.join(ret)
 
 
+class AddDiscardOnTranslator(object):
+    def volume_properties(self, new_volume):
+        """
+        Add "discard=on" flag to properties if possible
+        """
+        props = super().volume_properties(new_volume)
+
+        if new_volume.storage and new_volume.storage.has_discard_support:
+            values = props.split(',')
+            name, rest = values[0], values[1:]
+            rest = [
+                i for i in rest if i not in ('discard=on', 'discard=off')]
+            rest.append('discard=on')
+            rest.sort()
+            props = ','.join([name] + rest)
+
+        return props
+
+
 class DefaultConfigTranslator(
+        AddDiscardOnTranslator,
         TurnLxcIntoQemuConfigTranslator,
         BaseConfigTranslator):
     pass
@@ -2066,6 +2099,7 @@ class VmMover(object):
                 dst_vm = self.dst_pve.create_vm(
                     dst_config, nodeid=self.dst_node,
                     poolid=src_vm.poolid)
+            dst_vm.set_translator(translator)
 
             # Do initial attempt at moving VM volumes before bringing the
             # source down. This is possible if we have snapshot support.
@@ -2093,6 +2127,7 @@ class VmMover(object):
             # Okay. When name!=basename we've already started.
             dst_vm = self.dst_pve.get_vm(
                 src_vm.basename, suffix=SUFFIX_CREATING)
+            dst_vm.set_translator(translator)
             assert src_vm.poolid == dst_vm.poolid, (
                 src_vm.poolid, dst_vm.poolid)
 
