@@ -1,6 +1,8 @@
 Changes
 -------
 
+* **HEAD** - XXXX-XX-XX
+
 * **1.2** - 2022-09-21
 
   Changes:
