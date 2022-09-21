@@ -1,7 +1,28 @@
 Changes
 -------
 
-* **HEAD** - XXXX-XX-XX
+* **1.2** - 2022-09-21
+
+  Changes:
+
+  - Add ZFS snapshot migration for minimal downtime: full sync, poweroff,
+    final sync, poweron.
+  - Add --wait-before-stop to allow manual actions after initial sync.
+  - Add discard=on on ZFS volumes by default.
+  - Prefer rsync over scp.
+  - Add ssh_cipher setting (for AES speedup) for zfs-to-zfs transfers.
+  - Add workaround to fix boot order on 6.1+6.3 mixed clusters
+  - Show --average-rate in pv(1) viewer.
+
+  Tweaks/fixes:
+
+  - Create temp dir automatically, instead of complaining.
+  - Set onboot=0 on old-VM after migration so it does not auto-start.
+  - Improve various pre-copy checks.
+  - Fix confusing double exception, fix various other minor annoyances.
+  - Better ssh handling (accept fingerprints, forwarding only when necessary).
+  - Better handling of unsupported LXC.
+  - Also copy the source pool membership to the destination.
 
 * **1.1** - 2021-06-11
 
