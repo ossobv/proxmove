@@ -601,7 +601,10 @@ class ProxmoxStorage(object):
     @classmethod
     def from_section(cls, name, section):
         storages = []
-        for model in (ProxmoxStorageLvmThin, ProxmoxStoragePlain, ProxmoxStorageZfs):
+        for model in (
+                ProxmoxStorageLvmThin,
+                ProxmoxStoragePlain,
+                ProxmoxStorageZfs):
             try:
                 storage = model.from_section(name, section)
             except PrepareError:
@@ -981,7 +984,9 @@ class ProxmoxStoragePlain(ProxmoxStorage):
 
     def can_copy_from(self, src_storage, src_format=None):
         # We don't do conversion and only know about qcow2 and raw.
-        return (isinstance(src_storage, ProxmoxStoragePlain) or isinstance(src_storage, ProxmoxStorageLvmThin)) and src_format in (
+        return (isinstance(src_storage, ProxmoxStoragePlain) or
+                isinstance(src_storage, ProxmoxStorageLvmThin)
+                ) and src_format in (
             'qcow2', 'raw')
 
     def copy_to_temp(self, src_location, dst_storage, dst_name):
@@ -1400,7 +1405,12 @@ class ProxmoxStorageLvmThin(ProxmoxStorage):
         """
         path = os.path.join(self.path, image_location)
         data = self.ssh_command(
-            ['lvs', path, '-o', 'lv_size', '--noheadings', '--units', 'B', '--nosuffix'], hide_stderr=True)
+            ['lvs', path,
+             '-o', 'lv_size',
+             '--noheadings',
+             '--units', 'B',
+             '--nosuffix'
+             ], hide_stderr=True)
         number = data.decode('ascii', 'replace').strip()
         if not number:
             return None
@@ -1414,7 +1424,7 @@ class ProxmoxStorageLvmThin(ProxmoxStorage):
         return self.get_volume_size(image_location)
 
     def copy_already_done(self, src_storage, dst_name, disk_size, image_size):
-        log.warning('FIXME: Non-zfs resume not implemented yet')  # XXX
+        log.warning('FIXME: resume not implemented yet')  # XXX
         return None, None
 
     def can_copy_to(self, dst_storage, src_format=None):
@@ -1564,7 +1574,11 @@ class ProxmoxStorageLvmThin(ProxmoxStorage):
     def copy_from_temp(self, disk_size, src_temp, src_format, dst_id,
                        dst_name):
         assert disk_size, disk_size
-        self.ssh_command(['lvcreate', '-L', str(disk_size) + 'B', '-T', '-n', dst_name, 'pve'])
+        self.ssh_command(['lvcreate',
+                          '-L', str(disk_size) + 'B',
+                          '-T',
+                          '-n', dst_name,
+                          'pve'])
 
         dst_path = os.path.join(self.path, dst_name)
         log.info('Writing data from temp {!r} to {!r} (on {})'.format(
@@ -1597,7 +1611,7 @@ class ProxmoxStorageLvmThin(ProxmoxStorage):
         self.ssh_command(['rm', src_temp])
 
         # Return name and format (dst_name is the filesystem name on the
-        # ZFS pool known to belong to dst_storage).
+        # logical volume path known to belong to dst_storage).
         return dst_name, None
 
     def copy_direct(self, image_size, src_location, dst_storage, dst_name):
@@ -1607,11 +1621,15 @@ class ProxmoxStorageLvmThin(ProxmoxStorage):
         else:
             user_host, port = dst_storage.ssh, '22'
 
-        dst_storage.ssh_command(['lvcreate', '-L', str(image_size) + 'B', '-T', '-n', dst_name, 'pve'])
+        dst_storage.ssh_command(['lvcreate',
+                                 '-L', str(image_size) + 'B',
+                                 '-T',
+                                 '-n', dst_name,
+                                 'pve'])
 
         src_path = os.path.join(self.path, src_location)
         dst_path = os.path.join(dst_storage.path, dst_name)
-        log.info('zfs(1) send/recv {} data from {!r} to {!r} (on {})'.format(
+        log.info('dd send/recv {} data from {!r} to {!r} (on {})'.format(
             (image_size and human_size_fmt(image_size) or '<unknown>'),
             src_path, dst_path, dst_storage))
 
@@ -1663,19 +1681,8 @@ class ProxmoxStorageLvmThin(ProxmoxStorage):
             via_this=True)
 
         # Return name and format (dst_name is the filesystem name on the
-        # ZFS pool known to belong to dst_storage).
+        # logical volume path known to belong to dst_storage).
         return dst_name, None
-
-    # def set_path(self, value):
-    #     assert value.startswith('zfs:'), value
-    #     pool_name = value[4:]
-    #     valid_characters = string.ascii_letters + string.digits + '_-/'
-    #     if not pool_name or pool_name.startswith('/') or not all(
-    #             i in valid_characters for i in pool_name):
-    #         raise PrepareError(
-    #             'invalid characters in zfs pool name found {!r} storage '
-    #             'section: {}'.format(self.name, value))
-    #     return super().set_path(pool_name)
 
 
 class ProxmoxVm(object):
