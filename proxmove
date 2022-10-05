@@ -601,13 +601,14 @@ class ProxmoxStorage(object):
     @classmethod
     def from_section(cls, name, section):
         storages = []
-        for model in (ProxmoxStoragePlain, ProxmoxStorageZfs):
+        for model in (ProxmoxStorageLvmThin, ProxmoxStoragePlain, ProxmoxStorageZfs):
             try:
                 storage = model.from_section(name, section)
             except PrepareError:
                 pass
             else:
                 storages.append(storage)
+                break
 
         if len(storages) != 1:
             raise PrepareError(
@@ -980,7 +981,7 @@ class ProxmoxStoragePlain(ProxmoxStorage):
 
     def can_copy_from(self, src_storage, src_format=None):
         # We don't do conversion and only know about qcow2 and raw.
-        return isinstance(src_storage, ProxmoxStoragePlain) and src_format in (
+        return (isinstance(src_storage, ProxmoxStoragePlain) or isinstance(src_storage, ProxmoxStorageLvmThin)) and src_format in (
             'qcow2', 'raw')
 
     def copy_to_temp(self, src_location, dst_storage, dst_name):
@@ -1197,6 +1198,11 @@ class ProxmoxStorageZfs(ProxmoxStorage):
                 'qcow2', 'raw'):
             return True
 
+        # We can read/convert raw/qcow2 from ProxmoxStoragePlain.
+        if isinstance(src_storage, ProxmoxStorageLvmThin) and src_format in (
+                'qcow2', 'raw'):
+            return True
+
         return False
 
     def copy_to_temp(self, src_location, dst_storage, dst_name):
@@ -1362,6 +1368,314 @@ class ProxmoxStorageZfs(ProxmoxStorage):
                 'invalid characters in zfs pool name found {!r} storage '
                 'section: {}'.format(self.name, value))
         return super().set_path(pool_name)
+
+
+class ProxmoxStorageLvmThin(ProxmoxStorage):
+    has_discard_support = False
+    has_snapshot_support = False
+
+    @classmethod
+    def from_section(cls, name, section):
+        paths = [value for key, value in section if key == 'path']
+        if len(paths) != 1 or not paths[0].startswith('/dev/'):
+            raise PrepareError('not my kind of config')
+
+        return cls(name)
+
+    def check_prerequisite_commands(self):
+        if not self.has_commands(['ssh', 'dd', 'mbuffer', 'rsync']):
+            raise PrepareError(
+                'missing one or more required binaries mbuffer, rsync, ssh, '
+                'dd on storage {!r}; please install them'.format(self.name))
+
+    def get_physical_size(self, image_location):
+        """
+        Get exact size of physical (host-observed) disk (= zvol size).
+        """
+        return self.get_volume_size(image_location)
+
+    def get_volume_size(self, image_location):
+        """
+        Get exact size of (guest-observed) volume.
+        """
+        path = os.path.join(self.path, image_location)
+        data = self.ssh_command(
+            ['lvs', path, '-o', 'lv_size', '--noheadings', '--units', 'B', '--nosuffix'], hide_stderr=True)
+        number = data.decode('ascii', 'replace').strip()
+        if not number:
+            return None
+
+        return int(number)
+
+    def get_transfer_size(self, image_location):
+        """
+        Get size which we need to transfer. This is an estimate!
+        """
+        return self.get_volume_size(image_location)
+
+    def copy_already_done(self, src_storage, dst_name, disk_size, image_size):
+        log.warning('FIXME: Non-zfs resume not implemented yet')  # XXX
+        return None, None
+
+    def can_copy_to(self, dst_storage, src_format=None):
+        # Same storage, we should be good.
+        if isinstance(dst_storage, ProxmoxStorageLvmThin):
+            return True
+
+        if isinstance(dst_storage, ProxmoxStoragePlain):
+            return True
+
+        if isinstance(dst_storage, ProxmoxStorageZfs):
+            return True
+
+        # We don't know how to send raw images. Simply cat /dev/zvol/...?
+        return False
+
+    def can_copy_from(self, src_storage, src_format=None):
+        # Same storage, we should be good.
+        if isinstance(src_storage, ProxmoxStorageLvmThin):
+            return True
+
+        if isinstance(src_storage, ProxmoxStoragePlain):
+            return True
+
+        # We can read/convert raw/qcow2 from ProxmoxStoragePlain.
+        if isinstance(src_storage, ProxmoxStoragePlain) and src_format in (
+                'qcow2', 'raw'):
+            return True
+
+        return False
+
+    def copy_to_temp(self, src_location, dst_storage, dst_name):
+        if isinstance(dst_storage, ProxmoxStorageLvmThin):
+            # LvmThin->LvmThin copying requires no temp files.
+            return None
+        """
+                Copy image from source to a temp destination; checks pre-existence.
+
+                Return tempfile path on destination.
+                """
+        src_path = os.path.join(self.path, src_location)
+        dst_temp = os.path.join(dst_storage.temp, 'temp-proxmove', dst_name)
+
+        # mkdir temp location
+        dst_storage.ssh_command(['mkdir', '-p', os.path.dirname(dst_temp)])
+        try:
+            # test -f on the destination file. The assumption is that it
+            # doesn't exist. If it does, we'll have to resume OR abort.
+            dst_storage.ssh_command(['test', '!', '-f', dst_temp])
+        except :
+            # It exists already. "Compare" files and auto-resume of equal.
+            self._copy_to_temp_verify_existing(
+                src_location, dst_storage, dst_temp)
+        else:
+            # It doesn't exist. Do copy.
+            self._copy_to_temp_exec(src_path, dst_storage, dst_temp)
+
+        return dst_temp
+
+    def _copy_to_temp_verify_existing(self, src_location, dst_storage,
+                                      dst_temp):
+        """
+        Check equality of src_path and dst_temp and raise error if unequal.
+        """
+        src_size, dst_size = self.get_physical_size(src_location), -1
+        assert src_size != dst_size
+        try:
+            # Use ls -l instead of stat because stat %s/%z is not
+            # standardized across BSD/GNU.
+            data = dst_storage.ssh_command(
+                ['ls', '-l', dst_temp], hide_stderr=True)
+            dst_size = int(data.split()[4].decode('ascii', 'replace'))
+        except (subprocess.CalledProcessError, UnicodeDecodeError, ValueError):
+            pass
+        log.debug(
+            'Comparing existing files {!r} (size {}) with '
+            '{!r} (size {})'.format(
+                src_location, src_size, dst_temp, dst_size))
+        if dst_size != src_size:
+            raise ProxmoveError(
+                'Temp file {!r} exists on target with different file '
+                'size; please examine (and remove it?)'.format(dst_temp))
+        log.info(
+            'File {!r} exists on destination already; resuming because sizes '
+            'are equal ({})'.format(dst_temp, dst_size))
+
+    def _copy_to_temp_exec(self, src_path, dst_storage, dst_temp):
+        """
+        Copy src_path over dst_temp on target. Overwrites existing files.
+        """
+        # ...
+        if ':' in dst_storage.ssh:
+            user_host, port = dst_storage.ssh.split(':', 1)
+        else:
+            user_host, port = dst_storage.ssh, '22'
+
+        dst_path = '{}:{}'.format(user_host, dst_temp)
+        log.info('dd(1) copy from {!r} (on {}) to {!r}'.format(
+            src_path, self, dst_path))
+
+        # mbuffer takes k-, M- or G-bytes
+        mbuffer_write_limit = ''
+        if self.bwlimit_mbps:
+            mbuffer_write_limit = '-R {}k'.format(self.bwlimit_mbps * 128)
+
+        # pv shows a nice progress bar. It's optional.
+        optional_pv_pipe = ''
+        if dst_storage.has_commands(['pv']):
+            optional_pv_pipe = (
+                # --fineta does not exist on all versions..
+                # --force is required to make it display anything..
+                'pv --force --average-rate --progress | ')
+        else:
+            log.warning(
+                'pv(1) command is not found on the destination storage; '
+                'consider installing it to get a pretty progress bar')
+
+        if self.ssh_ciphers not in (None, '', 'default', 'defaults'):
+            ssh_ciphers = '-c {}'.format(self.ssh_ciphers)
+        else:
+            ssh_ciphers = ''
+
+        # Older mbuffer(1) [v20140310-3] on the receiving end
+        # may say: "mbuffer: warning: No controlling terminal
+        # and no autoloader command specified." This is fixed
+        # in newer versions [v20150412-3].
+        self.ssh_command(
+            ["dd if={src_path} bs=128k | "
+             "mbuffer -q -s 128k -m 1G {src_bwlim} | "
+             "ssh {ssh_ciphers} -o StrictHostKeyChecking=no "
+             "{dst_userhost} -p {dst_port} "
+             "'mbuffer {optional_quiet_mbuffer} -s 128k -m 1G | "
+             " {dst_pv}"
+             " dd of={dst_path}'".format(
+                 src_path=src_path,
+                 src_bwlim=mbuffer_write_limit,
+                 ssh_ciphers=ssh_ciphers,
+                 dst_userhost=user_host,
+                 dst_port=port,
+                 optional_quiet_mbuffer=(
+                     '-q' if optional_pv_pipe else ''),
+                 dst_pv=optional_pv_pipe,
+                 dst_path=dst_temp)],
+            tty=True,
+            via_this=True)
+
+    def copy_from_temp(self, disk_size, src_temp, src_format, dst_id,
+                       dst_name):
+        assert disk_size, disk_size
+        self.ssh_command(['lvcreate', '-L', str(disk_size) + 'B', '-T', '-n', dst_name, 'pve'])
+
+        dst_path = os.path.join(self.path, dst_name)
+        log.info('Writing data from temp {!r} to {!r} (on {})'.format(
+            src_temp, dst_path, self))
+
+        if src_format is None:
+            src_format = 'raw'
+        if src_format not in ('qcow2', 'raw'):
+            raise NotImplementedError(
+                'format conversion from {!r} not implemented'.format(
+                    src_format))
+
+        self.ssh_command(
+            # -n = no create volume
+            # -p = progress
+            # -t none = cache=none
+            #   qemu-img provides various cache options:
+            #   - writethrough = default, O_DSYNC (safest, slowest)
+            #   - writeback = new default, syncing to host [fast, resource hog]
+            #   - none = sync to host, O_DIRECT (bypass host page cache)
+            #   - unsafe = write to host, ignore all sync [fast, resource hog]
+            #   We would like 'unsafe' to get the best performance.
+            #   Unfortunately this appears to block the target system I/O too
+            #   much, causing I/O load spikes on other users of the system.
+            #   Using 'none' does not have this effect instead, at the expense
+            #   of a slower import (conversion).
+            ['qemu-img', 'convert', '-n', '-p', '-t', 'none',
+             '-f', src_format, '-O', 'raw', src_temp, dst_path], tty=True)
+        log.info('Removing temp {!r} (on {})'.format(dst_path, self))
+        self.ssh_command(['rm', src_temp])
+
+        # Return name and format (dst_name is the filesystem name on the
+        # ZFS pool known to belong to dst_storage).
+        return dst_name, None
+
+    def copy_direct(self, image_size, src_location, dst_storage, dst_name):
+        # ...
+        if ':' in dst_storage.ssh:
+            user_host, port = dst_storage.ssh.split(':', 1)
+        else:
+            user_host, port = dst_storage.ssh, '22'
+
+        dst_storage.ssh_command(['lvcreate', '-L', str(image_size) + 'B', '-T', '-n', dst_name, 'pve'])
+
+        src_path = os.path.join(self.path, src_location)
+        dst_path = os.path.join(dst_storage.path, dst_name)
+        log.info('zfs(1) send/recv {} data from {!r} to {!r} (on {})'.format(
+            (image_size and human_size_fmt(image_size) or '<unknown>'),
+            src_path, dst_path, dst_storage))
+
+        # mbuffer takes k-, M- or G-bytes
+        mbuffer_write_limit = ''
+        if self.bwlimit_mbps:
+            mbuffer_write_limit = '-R {}k'.format(self.bwlimit_mbps * 128)
+
+        # pv shows a nice progress bar. It's optional.
+        optional_pv_pipe = ''
+        if dst_storage.has_commands(['pv']):
+            optional_pv_pipe = (
+                # --fineta does not exist on all versions..
+                # --force is required to make it display anything..
+                'pv --force --eta --average-rate --progress -s {} | '.format(
+                    image_size))
+        else:
+            log.warning(
+                'pv(1) command is not found on the destination storage; '
+                'consider installing it to get a pretty progress bar')
+
+        if self.ssh_ciphers not in (None, '', 'default', 'defaults'):
+            ssh_ciphers = '-c {}'.format(self.ssh_ciphers)
+        else:
+            ssh_ciphers = ''
+
+        # Older mbuffer(1) [v20140310-3] on the receiving end
+        # may say: "mbuffer: warning: No controlling terminal
+        # and no autoloader command specified." This is fixed
+        # in newer versions [v20150412-3].
+        self.ssh_command(
+            ["dd if={src_path} bs=128k | "
+             "mbuffer -q -s 128k -m 1G {src_bwlim} | "
+             "ssh {ssh_ciphers} -o StrictHostKeyChecking=no "
+             "{dst_userhost} -p {dst_port} "
+             "'mbuffer {optional_quiet_mbuffer} -s 128k -m 1G | "
+             " {dst_pv}"
+             " dd of={dst_path}'".format(
+                 src_path=src_path,
+                 src_bwlim=mbuffer_write_limit,
+                 ssh_ciphers=ssh_ciphers,
+                 dst_userhost=user_host,
+                 dst_port=port,
+                 optional_quiet_mbuffer=(
+                     '-q' if optional_pv_pipe else ''),
+                 dst_pv=optional_pv_pipe,
+                 dst_path=dst_path)],
+            tty=True,
+            via_this=True)
+
+        # Return name and format (dst_name is the filesystem name on the
+        # ZFS pool known to belong to dst_storage).
+        return dst_name, None
+
+    # def set_path(self, value):
+    #     assert value.startswith('zfs:'), value
+    #     pool_name = value[4:]
+    #     valid_characters = string.ascii_letters + string.digits + '_-/'
+    #     if not pool_name or pool_name.startswith('/') or not all(
+    #             i in valid_characters for i in pool_name):
+    #         raise PrepareError(
+    #             'invalid characters in zfs pool name found {!r} storage '
+    #             'section: {}'.format(self.name, value))
+    #     return super().set_path(pool_name)
 
 
 class ProxmoxVm(object):
