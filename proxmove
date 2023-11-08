@@ -1182,6 +1182,7 @@ class ProxmoxStorageZfs(ProxmoxStorage):
     def can_copy_to(self, dst_storage, src_format=None):
         # Same storage, we should be good.
         if isinstance(dst_storage, ProxmoxStorageZfs):
+            assert src_format is None, src_format
             return True
 
         # We don't know how to send raw images. Simply cat /dev/zvol/...?
@@ -1190,6 +1191,7 @@ class ProxmoxStorageZfs(ProxmoxStorage):
     def can_copy_from(self, src_storage, src_format=None):
         # Same storage, we should be good.
         if isinstance(src_storage, ProxmoxStorageZfs):
+            assert src_format is None, src_format
             return True
 
         # We can read/convert raw/qcow2 from ProxmoxStoragePlain.
@@ -1640,8 +1642,24 @@ class ProxmoxVolume(object):
         file extension as fallback.
         """
         ret = self.get_property('format')
-        if not ret and isinstance(self.storage, ProxmoxStoragePlain):  # hacks
-            ret = self.location.rsplit('.', 1)[-1]
+
+        if isinstance(self.storage, ProxmoxStorageZfs):
+            if ret is None:
+                pass
+            elif ret == 'raw':
+                # Could be a stale setting from a previous migration?
+                log.debug(
+                    '- ignoring superfluous format=raw on ZFS filesystem')
+                ret = None
+            else:
+                raise ProxmoveError(
+                    'unexpected format={} on ZFS source'.format(ret))
+        elif isinstance(self.storage, ProxmoxStoragePlain):
+            # For the plain storage, we must have a format. Take the
+            # file extension.
+            if not ret:
+                ret = self.location.rsplit('.', 1)[-1]
+
         return ret
 
     def get_property(self, what):
