@@ -761,6 +761,10 @@ class ProxmoxStorage(object):
         return out
 
     def has_commands(self, commands):
+        """
+        TODO: We should run one with _all_ commands we might need and then
+        cache the result.
+        """
         fail = False
         try:
             result = self.ssh_command(['which'] + commands)
@@ -1306,8 +1310,18 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         if self.bwlimit_mbps:
             mbuffer_write_limit = '-R {}k'.format(self.bwlimit_mbps * 128)
 
+        # zfs send sends unencrypted/decompressed -- prefer compression
+        if (self.has_commands(['lz4']) and
+                dst_storage.has_commands(['lz4'])):
+            optional_lz4_spipe = 'lz4 -z | '
+            optional_lz4_dpipe = 'lz4 -d | '
+        else:
+            optional_lz4_spipe = optional_lz4_dpipe = ''
+            log.warning(
+                'lz4(1) command is not found on the src or dest storage; '
+                'consider installing it to get better transfer rates')
+
         # pv shows a nice progress bar. It's optional.
-        optional_pv_pipe = ''
         if dst_storage.has_commands(['pv']):
             optional_pv_pipe = (
                 # --fineta does not exist on all versions..
@@ -1315,6 +1329,7 @@ class ProxmoxStorageZfs(ProxmoxStorage):
                 'pv --force --eta --average-rate --progress -s {} | '.format(
                     image_size))
         else:
+            optional_pv_pipe = ''
             log.warning(
                 'pv(1) command is not found on the destination storage; '
                 'consider installing it to get a pretty progress bar')
@@ -1328,13 +1343,14 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         # may say: "mbuffer: warning: No controlling terminal
         # and no autoloader command specified." This is fixed
         # in newer versions [v20150412-3].
+        # pv(1) on dst will show the speed *after* decompression.
         self.ssh_command(
             ["zfs send -R {incremental} {src_zfs}@{src_zfs_snapshot} | "
-             "mbuffer -q -s 128k -m 1G {src_bwlim} | "
+             "{compress} mbuffer -q -s 128k -m 1G {src_bwlim} | "
              "ssh {ssh_ciphers} -o StrictHostKeyChecking=no "
              "{dst_userhost} -p {dst_port} "
              "'mbuffer {optional_quiet_mbuffer} -s 128k -m 1G | "
-             " {dst_pv}"
+             " {decompress} {dst_pv}"
              " zfs recv {force_receive} {dst_zfs}'".format(
                  incremental=incremental,
                  src_zfs=src_zfs,
@@ -1345,6 +1361,8 @@ class ProxmoxStorageZfs(ProxmoxStorage):
                  dst_port=port,
                  optional_quiet_mbuffer=(
                      '-q' if optional_pv_pipe else ''),
+                 compress=optional_lz4_spipe,
+                 decompress=optional_lz4_dpipe,
                  dst_pv=optional_pv_pipe,
                  force_receive=force_receive,
                  dst_zfs=dst_zfs)],
