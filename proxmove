@@ -481,6 +481,7 @@ class ProxmoxCluster(object):
                 '  # {base_url}\n'
                 '  api.nodes("{node}/{type}")'
                 '.create(**{config})\n\n'
+                'Do you have PVEVMAdmin + PVESDNAdmin perms?\n\n'
                 .format(
                     base_url=self.api._backend.base_url,
                     node=nodeid, type='qemu', config=mutable_config))
