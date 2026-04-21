@@ -786,7 +786,7 @@ class ProxmoxStorage(object):
         return True
 
     def _get_ssh_args(self, key_forwarding=False):
-        ssh_command = ['ssh']
+        ssh_command = ['ssh', '-o', 'LogLevel=error']
 
         if key_forwarding:
             # If we're doing key forwarding, we don't care about the
@@ -1055,7 +1055,7 @@ class ProxmoxStoragePlain(ProxmoxStorage):
 
         # Build remote ssh command for rsync. (Prefer rsync(1) over scp(1)
         # because scp has been observed to be slower.)
-        rsync_ssh = ['ssh', '-o', 'StrictHostKeyChecking=no']
+        rsync_ssh = ['ssh', '-o', 'LogLevel=error', '-o', 'StrictHostKeyChecking=no']
         if port != 22:
             rsync_ssh.extend(['-p', str(port)])
         if self.ssh_ciphers not in (None, '', 'default', 'defaults'):
@@ -1347,7 +1347,7 @@ class ProxmoxStorageZfs(ProxmoxStorage):
         self.ssh_command(
             ["zfs send -R {incremental} {src_zfs}@{src_zfs_snapshot} | "
              "{compress} mbuffer -q -s 128k -m 1G {src_bwlim} | "
-             "ssh {ssh_ciphers} -o StrictHostKeyChecking=no "
+             "ssh {ssh_ciphers} -o LogLevel=error -o StrictHostKeyChecking=no "
              "{dst_userhost} -p {dst_port} "
              "'mbuffer {optional_quiet_mbuffer} -s 128k -m 1G | "
              " {decompress} {dst_pv}"
