@@ -51,6 +51,8 @@ PROXMOX_VOLUME_TYPES = (
     'efidisk', 'ide', 'sata', 'scsi', 'virtio')
 PROXMOX_VOLUME_TYPES_RE = re.compile(  # "scsi0", but not "scsihw"
     r'^({})\d+$'.format('|'.join(PROXMOX_VOLUME_TYPES)))
+PROXMOX_VOLUME_TYPES_EFIDISK_RE = re.compile(
+    r'^(efidisk)\d+$')
 PROXMOVE_VOLUME_NAME_FMT = 'vm-{vmid}-disk-{diskidx}'  # dst volume name
 
 
@@ -1619,6 +1621,10 @@ class ProxmoxVolume(object):
         if not PROXMOX_VOLUME_TYPES_RE.match(slot):
             return None
 
+        no_discard = False
+        if PROXMOX_VOLUME_TYPES_EFIDISK_RE.match(slot):
+            no_discard = True
+
         # cluster = <...>
         # node = 'pveX'
         # slot = 'ide2', 'virtio0'
@@ -1644,12 +1650,13 @@ class ProxmoxVolume(object):
             # Might raise exception if not found.
             storage = cluster.get_storage(node, storage)
 
-        return ProxmoxVolume(location, properties, storage=storage)
+        return ProxmoxVolume(location, properties, storage=storage, no_discard=no_discard)
 
-    def __init__(self, location, properties, storage=None):
+    def __init__(self, location, properties, storage=None, no_discard=False):
         self.location = location
         self.properties = properties
         self.storage = storage
+        self.no_discard = no_discard
 
     def is_removable(self):
         parts = self.properties.split(',')
@@ -1770,7 +1777,8 @@ class ProxmoxVolume(object):
         log.info('Volume transferring/conversion 100% (is/was) complete!')
         return ProxmoxVolume(
             new_path, self.get_properties(format=new_format),
-            storage=new_storage)
+            storage=new_storage,
+            no_discard=self.no_discard)
 
     def as_properties(self):
         """
@@ -1901,7 +1909,7 @@ class AddDiscardOnTranslator(object):
         """
         props = super().volume_properties(new_volume)
 
-        if new_volume.storage and new_volume.storage.has_discard_support:
+        if not new_volume.no_discard and new_volume.storage and new_volume.storage.has_discard_support:
             values = props.split(',')
             name, rest = values[0], values[1:]
             rest = [
