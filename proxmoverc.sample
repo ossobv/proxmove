@@ -14,14 +14,16 @@
 ; across nodes, others exist on a single node only.
 ;
 ; If the path is a plain path, file-based images are used. If the path
-; starts with "zfs:", it is considered to be a zfs filesystem path.
+; equals with "/dev/pve", it is considered to be a local-lvm (LvmThin)
+; logical volumes are used. If the path starts with "zfs:", it is
+; considered to be a zfs filesystem path.
 ;
 ;     [storage:CLUSTER_ALIAS:DISK_NAME[@NODE_NAME]]
 ;     ssh=root@HOST
 ;     path=/path/to/somewhere   ; for plain disk (DISK_NAME:VMID/...), or
 ;     path=zfs:ZFS_FS_NAME      ; for ZFS (DISK_NAME:vm-VMID-disk-1)
 
-; Example cluster named "banana-cluster" with 3 storage devices, one
+; Example cluster named "banana-cluster" with 4 storage devices, one
 ; shared, and two which exist on a single node only.
 [pve:banana-cluster]
 api=https://user@pve:PASSWORD@banana-cluster.com:443
@@ -40,6 +42,11 @@ api=https://user@pve:PASSWORD@banana-cluster.com:443
   ssh=root@node2.banana-cluster.com
   path=/srv/images
   temp=/srv/temp
+
+  [storage:banana-cluster@local-lvm@node2] ; local-lvm disk on node 2 only
+  ssh=root@node2.banana-cluster.com
+  path=/dev/pve
+  temp=/var/tmp
 
 ; Example cluster named "the-new-cluster" with 2 storage devices; both
 ; storage devices exist on the respective nodes only.
